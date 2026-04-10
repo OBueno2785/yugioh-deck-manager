@@ -19,25 +19,30 @@ config.resolver.nodeModulesPaths = [
 // Resolve "source" field (TypeScript source) before "main" (compiled dist)
 config.resolver.resolverMainFields = ["react-native", "source", "browser", "main"];
 
-// Enable package exports (needed for @yugioh/core react-native condition)
+// Enable package exports
 config.resolver.unstable_enablePackageExports = true;
 
-// Resolve .js imports to .ts files — needed because @yugioh/core uses
-// ESM-style ".js" extensions in TypeScript imports (e.g. "./probability.js")
-// but the actual files are ".ts". Metro won't find them without this.
-const defaultResolver = config.resolver.resolveRequest;
-config.resolver.resolveRequest = (context, moduleName, platform) => {
+// Apply NativeWind first, then wrap its resolver
+const nativeWindConfig = withNativeWind(config, { input: "./global.css" });
+
+// Resolve .js imports → .ts files for @yugioh/core (uses ESM .js extensions in TS source)
+const upstreamResolve = nativeWindConfig.resolver.resolveRequest;
+nativeWindConfig.resolver.resolveRequest = (context, moduleName, platform) => {
   if (moduleName.endsWith(".js")) {
     try {
-      return context.resolveRequest(context, moduleName.slice(0, -3), platform);
+      const stripped = moduleName.slice(0, -3);
+      if (upstreamResolve) {
+        return upstreamResolve(context, stripped, platform);
+      }
+      return context.resolveRequest(context, stripped, platform);
     } catch {
-      // fall through to default resolution
+      // fall through to original name
     }
   }
-  if (defaultResolver) {
-    return defaultResolver(context, moduleName, platform);
+  if (upstreamResolve) {
+    return upstreamResolve(context, moduleName, platform);
   }
   return context.resolveRequest(context, moduleName, platform);
 };
 
-module.exports = withNativeWind(config, { input: "./global.css" });
+module.exports = nativeWindConfig;
