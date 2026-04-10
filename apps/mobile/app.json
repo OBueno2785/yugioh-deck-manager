@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "YGO Deck Manager",
+    "slug": "yugioh-deck-manager",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "scheme": "yugioh",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f0f13"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yugioh.deckmanager"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0f0f13"
+      },
+      "package": "com.yugioh.deckmanager",
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "e1fc0a2c-e1aa-45d6-b0ce-f49637a0631b"
+      }
+    }
+  }
+}
