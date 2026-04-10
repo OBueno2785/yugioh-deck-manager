@@ -16,7 +16,11 @@ config.resolver.nodeModulesPaths = [
   path.resolve(workspaceRoot, "node_modules"),
 ];
 
-// Enable package exports (needed for @yugioh/core ESM exports)
+// Resolve "source" field (TypeScript source) before "main" (compiled dist)
+// This lets Metro use @yugioh/core TypeScript directly without needing a build step
+config.resolver.resolverMainFields = ["react-native", "source", "browser", "main"];
+
+// Enable package exports (needed for @yugioh/core react-native condition)
 config.resolver.unstable_enablePackageExports = true;
 
 module.exports = withNativeWind(config, { input: "./global.css" });
