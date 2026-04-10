@@ -1,6 +1,7 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo } from "react";
 import {
-  View, Text, ScrollView, TouchableOpacity, FlatList, Alert,
+  View, Text, ScrollView, TouchableOpacity, FlatList,
+  Modal, Pressable, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useDeckStore } from "@/store/deckStore";
@@ -14,25 +15,23 @@ import type { CardRole, LabeledDeckCard, Card } from "@yugioh/core";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ROLE_LABELS: Record<CardRole, string> = {
-  starter: "Starter",
-  extender: "Extender",
-  handtrap: "Handtrap",
-  boardbreak: "Board Break",
-  garnets: "Garnets",
-  engine: "Engine",
-  tech: "Tech",
-};
+const ROLES: { role: CardRole; label: string; desc: string; color: string }[] = [
+  { role: "starter",    label: "Starter",     desc: "Inicia el combo principal",         color: "#50c878" },
+  { role: "extender",   label: "Extender",    desc: "Extiende el combo desde la mano",   color: "#88aaff" },
+  { role: "handtrap",   label: "Handtrap",    desc: "Disruption desde la mano",          color: "#ff8844" },
+  { role: "boardbreak", label: "Board Break", desc: "Rompe tableros establecidos",       color: "#cc44ff" },
+  { role: "garnets",    label: "Garnets",     desc: "Cartas situacionales / ladrillos",  color: "#e05050" },
+  { role: "engine",     label: "Engine",      desc: "Pieza de motor genérico",           color: "#44ccff" },
+  { role: "tech",       label: "Tech",        desc: "Respuesta específica / tech card",  color: "#aaaaaa" },
+];
 
-const ROLE_COLORS: Record<CardRole, string> = {
-  starter: "#50c878",
-  extender: "#88aaff",
-  handtrap: "#ff8844",
-  boardbreak: "#cc44ff",
-  garnets: "#e05050",
-  engine: "#44ccff",
-  tech: "#aaaaaa",
-};
+const ROLE_COLOR: Record<CardRole, string> = Object.fromEntries(
+  ROLES.map((r) => [r.role, r.color])
+) as Record<CardRole, string>;
+
+const ROLE_LABEL: Record<CardRole, string> = Object.fromEntries(
+  ROLES.map((r) => [r.role, r.label])
+) as Record<CardRole, string>;
 
 function scoreColor(score: number) {
   if (score >= 75) return "#50c878";
@@ -40,16 +39,84 @@ function scoreColor(score: number) {
   return "#e05050";
 }
 
-function pct(n: number) {
-  return `${(n * 100).toFixed(1)}%`;
+function pct(n: number) { return `${(n * 100).toFixed(1)}%`; }
+
+// ─── Role Picker Modal ────────────────────────────────────────────────────────
+
+function RolePickerModal({
+  dc, onClose, onSelect,
+}: {
+  dc: LabeledDeckCard | null;
+  onClose: () => void;
+  onSelect: (role: CardRole | undefined) => void;
+}) {
+  if (!dc) return null;
+  return (
+    <Modal visible animationType="slide" transparent onRequestClose={onClose}>
+      <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }} onPress={onClose} />
+      <View style={{
+        backgroundColor: "#1a1a24",
+        borderTopLeftRadius: 20, borderTopRightRadius: 20,
+        paddingBottom: 32, paddingTop: 16,
+      }}>
+        {/* Handle */}
+        <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: "#3a3a4a", alignSelf: "center", marginBottom: 12 }} />
+
+        <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700", paddingHorizontal: 20, marginBottom: 4 }}
+          numberOfLines={1}>
+          {dc.card.name}
+        </Text>
+        <Text style={{ color: "#7070a0", fontSize: 11, paddingHorizontal: 20, marginBottom: 16 }}>
+          Asignar rol para análisis de consistencia
+        </Text>
+
+        {/* Clear */}
+        <TouchableOpacity
+          onPress={() => { onSelect(undefined); onClose(); }}
+          style={{
+            flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 12,
+            borderBottomWidth: 1, borderBottomColor: "#2a2a3a",
+          }}
+        >
+          <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: "#3a3a4a", marginRight: 12 }} />
+          <Text style={{ color: "#7070a0", fontSize: 14 }}>Sin rol</Text>
+          {!dc.role && (
+            <Text style={{ color: "#c89b3c", fontSize: 12, marginLeft: "auto" }}>✓ actual</Text>
+          )}
+        </TouchableOpacity>
+
+        {ROLES.map(({ role, label, desc, color }) => (
+          <TouchableOpacity
+            key={role}
+            onPress={() => { onSelect(role); onClose(); }}
+            style={{
+              flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 12,
+              borderBottomWidth: 1, borderBottomColor: "#2a2a3a",
+              backgroundColor: dc.role === role ? color + "15" : "transparent",
+            }}
+          >
+            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: color, marginRight: 12 }} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: "#fff", fontSize: 14, fontWeight: dc.role === role ? "700" : "400" }}>{label}</Text>
+              <Text style={{ color: "#7070a0", fontSize: 11 }}>{desc}</Text>
+            </View>
+            {dc.role === role && (
+              <Text style={{ color: color, fontSize: 14, fontWeight: "700" }}>✓</Text>
+            )}
+          </TouchableOpacity>
+        ))}
+      </View>
+    </Modal>
+  );
 }
 
-// ─── Score Gauge ──────────────────────────────────────────────────────────────
+// ─── Score Gauge + Legend ─────────────────────────────────────────────────────
 
 function ScoreGauge({ score }: { score: number }) {
   const color = scoreColor(score);
+  const [showInfo, setShowInfo] = useState(false);
   return (
-    <View className="items-center py-4">
+    <View className="items-center py-2">
       <View style={{
         width: 96, height: 96, borderRadius: 48,
         borderWidth: 6, borderColor: color,
@@ -58,7 +125,41 @@ function ScoreGauge({ score }: { score: number }) {
       }}>
         <Text style={{ color, fontSize: 28, fontWeight: "bold", fontFamily: "monospace" }}>{score}</Text>
       </View>
-      <Text className="text-muted text-xs mt-2 uppercase tracking-wider">Consistency Score</Text>
+      <TouchableOpacity onPress={() => setShowInfo(!showInfo)} style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 8 }}>
+        <Text className="text-muted text-xs uppercase tracking-wider">Consistency Score</Text>
+        <Text style={{ color: "#7070a0", fontSize: 12 }}>{showInfo ? "▲" : "ⓘ"}</Text>
+      </TouchableOpacity>
+
+      {showInfo && (
+        <View style={{
+          marginTop: 8, backgroundColor: "#1e1e2e", borderRadius: 12, padding: 12, width: "100%",
+          borderWidth: 1, borderColor: "#2a2a3a",
+        }}>
+          <Text style={{ color: "#c89b3c", fontSize: 12, fontWeight: "700", marginBottom: 6 }}>¿Cómo se calcula?</Text>
+          {[
+            { label: "Combo Rate", pts: "hasta 40 pts", desc: "P(abrir al menos 1 Starter en mano inicial)" },
+            { label: "Mazo de 40 cartas", pts: "20 pts", desc: "Mazos más pequeños son más consistentes" },
+            { label: "Handtraps", pts: "hasta 20 pts", desc: "Más handtraps = más disruption (cap en 9)" },
+            { label: "Garnets", pts: "−hasta 20 pts", desc: "Cartas ladrillo penalizan la consistencia" },
+          ].map(({ label, pts, desc }) => (
+            <View key={label} style={{ flexDirection: "row", gap: 8, marginBottom: 4 }}>
+              <Text style={{ color: "#c89b3c", fontSize: 10, width: 70 }}>{pts}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: "#fff", fontSize: 11, fontWeight: "600" }}>{label}</Text>
+                <Text style={{ color: "#7070a0", fontSize: 10 }}>{desc}</Text>
+              </View>
+            </View>
+          ))}
+          <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: "#2a2a3a", flexDirection: "row", gap: 12 }}>
+            {[["≥75", "#50c878", "Bueno"], ["≥50", "#c89b3c", "Regular"], ["<50", "#e05050", "Bajo"]].map(([v, c, l]) => (
+              <View key={v} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c }} />
+                <Text style={{ color: "#aaa", fontSize: 10 }}>{v} = {l}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -80,38 +181,31 @@ function StatChip({ label, value, color }: { label: string; value: string | numb
 
 function RoleBadge({ role }: { role: CardRole | undefined }) {
   if (!role) return null;
+  const color = ROLE_COLOR[role];
   return (
-    <View style={{
-      backgroundColor: ROLE_COLORS[role] + "33",
-      borderRadius: 99, paddingHorizontal: 6, paddingVertical: 2,
-    }}>
-      <Text style={{ color: ROLE_COLORS[role], fontSize: 10, fontWeight: "600" }}>
-        {ROLE_LABELS[role]}
-      </Text>
+    <View style={{ backgroundColor: color + "33", borderRadius: 99, paddingHorizontal: 6, paddingVertical: 2 }}>
+      <Text style={{ color, fontSize: 10, fontWeight: "600" }}>{ROLE_LABEL[role]}</Text>
     </View>
   );
 }
 
-// ─── Card Row (By Card tab) ───────────────────────────────────────────────────
+// ─── Card Row ─────────────────────────────────────────────────────────────────
 
 function CardRow({
-  dc, deckSize, goingFirst, onSetRole,
+  dc, deckSize, goingFirst, onPress,
 }: {
   dc: LabeledDeckCard;
   deckSize: number;
   goingFirst: boolean;
-  onSetRole: (dc: LabeledDeckCard) => void;
+  onPress: () => void;
 }) {
-  const hand = goingFirst ? 5 : 6;
-  const prob = probabilityAtLeast(deckSize, dc.quantity, hand, 1);
-
+  const prob = probabilityAtLeast(deckSize, dc.quantity, goingFirst ? 5 : 6, 1);
   return (
     <TouchableOpacity
       className="flex-row items-center py-2 border-b border-border gap-3 px-3"
-      onPress={() => onSetRole(dc)}
+      onPress={onPress}
     >
-      <CardImage card={dc.card} size="small"
-        imageIndex={dc.selectedImageIndex ?? 0}
+      <CardImage card={dc.card} size="small" imageIndex={dc.selectedImageIndex ?? 0}
         style={{ width: 28, aspectRatio: 421 / 614, borderRadius: 4 }} />
       <View className="flex-1 min-w-0">
         <Text className="text-text text-xs" numberOfLines={1}>{dc.card.name}</Text>
@@ -124,39 +218,10 @@ function CardRow({
         <Text style={{
           fontFamily: "monospace", fontSize: 13, fontWeight: "700",
           color: prob >= 0.7 ? "#50c878" : prob >= 0.4 ? "#c89b3c" : "#e05050",
-        }}>
-          {pct(prob)}
-        </Text>
+        }}>{pct(prob)}</Text>
         <Text className="text-muted" style={{ fontSize: 9 }}>opening hand</Text>
       </View>
     </TouchableOpacity>
-  );
-}
-
-// ─── Hand Card (Simulator tab) ────────────────────────────────────────────────
-
-function HandCard({ card, dc }: { card: Card; dc: LabeledDeckCard | undefined }) {
-  return (
-    <View style={{ alignItems: "center", gap: 4 }}>
-      <View style={{ width: 64, aspectRatio: 421 / 614, borderRadius: 6, overflow: "hidden" }}>
-        <CardImage
-          card={card}
-          size="small"
-          imageIndex={dc?.selectedImageIndex ?? 0}
-          style={{ width: "100%", height: "100%" }}
-        />
-      </View>
-      {dc?.role && (
-        <View style={{
-          backgroundColor: ROLE_COLORS[dc.role] + "33",
-          borderRadius: 99, paddingHorizontal: 5, paddingVertical: 1,
-        }}>
-          <Text style={{ color: ROLE_COLORS[dc.role], fontSize: 9, fontWeight: "600" }}>
-            {ROLE_LABELS[dc.role]}
-          </Text>
-        </View>
-      )}
-    </View>
   );
 }
 
@@ -169,8 +234,6 @@ function SimulatorPanel({ main, goingFirst }: { main: LabeledDeckCard[]; goingFi
 
   const expanded = useMemo(() => expandDeck(main), [main]);
   const handSize = goingFirst ? 5 : 6;
-
-  // Map card id → LabeledDeckCard for role lookup
   const dcMap = useMemo(() => {
     const m = new Map<number, LabeledDeckCard>();
     for (const dc of main) m.set(dc.card.id, dc);
@@ -190,21 +253,16 @@ function SimulatorPanel({ main, goingFirst }: { main: LabeledDeckCard[]; goingFi
   function runMonteCarlo() {
     const starters = main.filter((dc) => dc.role === "starter");
     if (starters.length === 0) {
-      Alert.alert("No starters tagged", "Go to the 'By Card' tab and tap cards to assign them the Starter role.");
+      Alert.alert("Sin Starters", "Ve al tab 'Por Carta' y asigna el rol Starter a las cartas que inician tu combo.");
       return;
     }
     setRunning(true);
     setTimeout(() => {
       const result = runSimulation({
-        deck: expanded,
-        handSize,
-        iterations: 10000,
+        deck: expanded, handSize, iterations: 10000,
         conditions: [{
-          id: "starter",
-          label: "Open at least 1 starter",
-          type: "has_any",
-          cardIds: starters.map((dc) => dc.card.id),
-          minCount: 1,
+          id: "starter", label: "Abrir al menos 1 starter",
+          type: "has_any", cardIds: starters.map((dc) => dc.card.id), minCount: 1,
         }],
       });
       const prob = result.conditionResults[0]?.probability ?? 0;
@@ -213,7 +271,6 @@ function SimulatorPanel({ main, goingFirst }: { main: LabeledDeckCard[]; goingFi
     }, 10);
   }
 
-  // Role summary of drawn hand
   const roleSummary = useMemo(() => {
     const counts: Partial<Record<CardRole, number>> = {};
     for (const c of hand) {
@@ -224,37 +281,47 @@ function SimulatorPanel({ main, goingFirst }: { main: LabeledDeckCard[]; goingFi
   }, [hand, dcMap]);
 
   return (
-    <ScrollView className="flex-1" contentContainerStyle={{ padding: 16, gap: 16 }}>
-      {/* Draw hand */}
-      <TouchableOpacity
-        className="bg-accent rounded-xl py-3 items-center"
-        onPress={drawNewHand}
-      >
-        <Text className="text-bg font-bold text-base">
-          Draw Hand ({handSize} cards)
-        </Text>
+    <ScrollView className="flex-1" contentContainerStyle={{ padding: 16, gap: 16, paddingBottom: 32 }}>
+      <TouchableOpacity className="bg-accent rounded-xl py-3 items-center" onPress={drawNewHand}>
+        <Text className="text-bg font-bold text-base">Robar mano ({handSize} cartas)</Text>
       </TouchableOpacity>
 
       {hand.length > 0 && (
         <>
-          {/* Cards */}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
-            {hand.map((card, i) => (
-              <HandCard key={i} card={card} dc={dcMap.get(card.id)} />
-            ))}
+            {hand.map((card, i) => {
+              const dc = dcMap.get(card.id);
+              return (
+                <View key={i} style={{ alignItems: "center", gap: 4 }}>
+                  <View style={{ width: 64, aspectRatio: 421 / 614, borderRadius: 6, overflow: "hidden" }}>
+                    <CardImage card={card} size="small" imageIndex={dc?.selectedImageIndex ?? 0}
+                      style={{ width: "100%", height: "100%" }} />
+                  </View>
+                  {dc?.role && (
+                    <View style={{
+                      backgroundColor: ROLE_COLOR[dc.role] + "33", borderRadius: 99,
+                      paddingHorizontal: 5, paddingVertical: 1,
+                    }}>
+                      <Text style={{ color: ROLE_COLOR[dc.role], fontSize: 9, fontWeight: "600" }}>
+                        {ROLE_LABEL[dc.role]}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              );
+            })}
           </View>
 
-          {/* Role breakdown */}
           {Object.keys(roleSummary).length > 0 && (
             <View className="bg-surface rounded-xl p-3 gap-2">
-              <Text className="text-muted text-xs font-semibold uppercase">Hand Breakdown</Text>
+              <Text className="text-muted text-xs font-semibold uppercase">Composición de la mano</Text>
               {(Object.entries(roleSummary) as [CardRole, number][]).map(([role, count]) => (
                 <View key={role} className="flex-row justify-between items-center">
                   <View className="flex-row items-center gap-2">
-                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: ROLE_COLORS[role] }} />
-                    <Text className="text-text text-xs">{ROLE_LABELS[role]}</Text>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: ROLE_COLOR[role] }} />
+                    <Text className="text-text text-xs">{ROLE_LABEL[role]}</Text>
                   </View>
-                  <Text style={{ color: ROLE_COLORS[role], fontFamily: "monospace", fontSize: 13, fontWeight: "700" }}>
+                  <Text style={{ color: ROLE_COLOR[role], fontFamily: "monospace", fontSize: 13, fontWeight: "700" }}>
                     ×{count}
                   </Text>
                 </View>
@@ -264,23 +331,21 @@ function SimulatorPanel({ main, goingFirst }: { main: LabeledDeckCard[]; goingFi
         </>
       )}
 
-      {/* Monte Carlo */}
       <View className="bg-surface rounded-xl p-4 gap-3">
-        <Text className="text-text text-sm font-semibold">Monte Carlo (10,000 hands)</Text>
+        <Text className="text-text text-sm font-semibold">Monte Carlo — 10,000 manos</Text>
         <Text className="text-muted text-xs">
-          Runs 10,000 simulated hands and calculates the real probability of opening at least one card tagged as Starter.
+          Simula 10,000 manos de apertura y calcula la probabilidad real de abrir al menos 1 carta con rol Starter.
         </Text>
         <TouchableOpacity
           style={{
-            backgroundColor: running ? "#2a2a3a" : "#2a2a3a",
-            borderWidth: 1, borderColor: "#c89b3c",
+            borderWidth: 1, borderColor: running ? "#3a3a4a" : "#c89b3c",
             borderRadius: 10, paddingVertical: 10, alignItems: "center",
           }}
           onPress={runMonteCarlo}
           disabled={running}
         >
-          <Text style={{ color: "#c89b3c", fontWeight: "600", fontSize: 13 }}>
-            {running ? "Running…" : "Run Simulation"}
+          <Text style={{ color: running ? "#3a3a4a" : "#c89b3c", fontWeight: "600", fontSize: 13 }}>
+            {running ? "Calculando…" : "Correr simulación"}
           </Text>
         </TouchableOpacity>
 
@@ -289,9 +354,7 @@ function SimulatorPanel({ main, goingFirst }: { main: LabeledDeckCard[]; goingFi
             <Text style={{ color: "#50c878", fontSize: 32, fontWeight: "bold", fontFamily: "monospace" }}>
               {mcResult.prob}
             </Text>
-            <Text className="text-muted text-xs">
-              probability of opening a starter ({mcResult.ms}ms)
-            </Text>
+            <Text className="text-muted text-xs">probabilidad de abrir un starter ({mcResult.ms}ms)</Text>
           </View>
         )}
       </View>
@@ -306,6 +369,7 @@ type ActiveTab = "overview" | "cards" | "simulator";
 export default function ConsistencyScreen() {
   const [goingFirst, setGoingFirst] = useState(true);
   const [activeTab, setActiveTab] = useState<ActiveTab>("overview");
+  const [roleTarget, setRoleTarget] = useState<LabeledDeckCard | null>(null);
 
   const { name, main, extra, side, format, setCardRole } = useDeckStore();
 
@@ -322,48 +386,41 @@ export default function ConsistencyScreen() {
 
   const sortedMain = useMemo(() => {
     const hand = goingFirst ? 5 : 6;
-    return [...main].sort((a, b) => {
-      const pa = probabilityAtLeast(deckSize, a.quantity, hand, 1);
-      const pb = probabilityAtLeast(deckSize, b.quantity, hand, 1);
-      return pb - pa;
-    });
+    return [...main].sort((a, b) =>
+      probabilityAtLeast(deckSize, b.quantity, hand, 1) -
+      probabilityAtLeast(deckSize, a.quantity, hand, 1)
+    );
   }, [main, deckSize, goingFirst]);
-
-  function handleSetRole(dc: LabeledDeckCard) {
-    const roles: Array<CardRole | undefined> = [
-      undefined, "starter", "extender", "handtrap", "boardbreak", "garnets", "engine", "tech",
-    ];
-    const options = [
-      "Clear role", "Starter", "Extender", "Handtrap",
-      "Board Break", "Garnets (brick)", "Engine", "Tech", "Cancel",
-    ];
-    Alert.alert(dc.card.name, "Set role for consistency analysis", options.map((title, i) => ({
-      text: title,
-      style: title === "Cancel" ? "cancel" : undefined,
-      onPress: () => { if (title !== "Cancel") setCardRole(dc.card.id, dc.zone, roles[i]); },
-    })));
-  }
 
   if (isEmpty) {
     return (
-      <SafeAreaView className="flex-1 bg-bg items-center justify-center" edges={["left", "right", "bottom"]}>
+      <SafeAreaView className="flex-1 bg-bg items-center justify-center" edges={["left", "right"]}>
         <Text style={{ fontSize: 40 }}>📊</Text>
-        <Text className="text-text font-semibold text-base mt-3">No cards in deck</Text>
+        <Text className="text-text font-semibold text-base mt-3">Mazo vacío</Text>
         <Text className="text-muted text-sm mt-1 text-center px-8">
-          Add cards in the Deck Builder tab to see consistency analysis.
+          Agregá cartas en el Deck Builder para ver el análisis de consistencia.
         </Text>
       </SafeAreaView>
     );
   }
 
   const TABS: { id: ActiveTab; label: string }[] = [
-    { id: "overview", label: "Overview" },
-    { id: "cards", label: "By Card" },
-    { id: "simulator", label: "Simulator" },
+    { id: "overview", label: "Resumen" },
+    { id: "cards", label: "Por Carta" },
+    { id: "simulator", label: "Simulador" },
   ];
 
   return (
-    <SafeAreaView className="flex-1 bg-bg" edges={["left", "right", "bottom"]}>
+    <SafeAreaView className="flex-1 bg-bg" edges={["left", "right"]}>
+      {/* Role picker modal */}
+      <RolePickerModal
+        dc={roleTarget}
+        onClose={() => setRoleTarget(null)}
+        onSelect={(role) => {
+          if (roleTarget) setCardRole(roleTarget.card.id, roleTarget.zone, role);
+        }}
+      />
+
       {/* Tabs */}
       <View className="flex-row bg-surface border-b border-border">
         {TABS.map((tab) => (
@@ -383,56 +440,34 @@ export default function ConsistencyScreen() {
         ))}
       </View>
 
-      {/* Going 1st / 2nd toggle (visible in overview + cards) */}
-      {activeTab !== "simulator" && (
-        <View className="flex-row bg-surface border-b border-border px-3 py-1.5 gap-2">
-          {[true, false].map((val) => (
-            <TouchableOpacity
-              key={String(val)}
-              className="flex-1 py-1.5 rounded-lg items-center"
-              style={{ backgroundColor: goingFirst === val ? "#c89b3c" : "#2a2a3a" }}
-              onPress={() => setGoingFirst(val)}
-            >
-              <Text style={{
-                color: goingFirst === val ? "#000" : "#7070a0",
-                fontSize: 11, fontWeight: goingFirst === val ? "700" : "400",
-              }}>
-                Going {val ? "1st (5)" : "2nd (6)"}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
+      {/* Going 1st / 2nd toggle */}
+      <View className="flex-row bg-surface border-b border-border px-3 py-1.5 gap-2">
+        {[true, false].map((val) => (
+          <TouchableOpacity
+            key={String(val)}
+            className="flex-1 py-1.5 rounded-lg items-center"
+            style={{ backgroundColor: goingFirst === val ? "#c89b3c" : "#2a2a3a" }}
+            onPress={() => setGoingFirst(val)}
+          >
+            <Text style={{
+              color: goingFirst === val ? "#000" : "#7070a0",
+              fontSize: 11, fontWeight: goingFirst === val ? "700" : "400",
+            }}>
+              {val ? "Ir primero (5)" : "Ir segundo (6)"}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
 
-      {/* Going 1st / 2nd toggle for simulator */}
-      {activeTab === "simulator" && (
-        <View className="flex-row bg-surface border-b border-border px-3 py-1.5 gap-2">
-          {[true, false].map((val) => (
-            <TouchableOpacity
-              key={String(val)}
-              className="flex-1 py-1.5 rounded-lg items-center"
-              style={{ backgroundColor: goingFirst === val ? "#c89b3c" : "#2a2a3a" }}
-              onPress={() => setGoingFirst(val)}
-            >
-              <Text style={{
-                color: goingFirst === val ? "#000" : "#7070a0",
-                fontSize: 11, fontWeight: goingFirst === val ? "700" : "400",
-              }}>
-                Going {val ? "1st (5)" : "2nd (6)"}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
+      {/* Overview */}
       {activeTab === "overview" && (
-        <ScrollView className="flex-1" contentContainerStyle={{ padding: 16, gap: 12 }}>
+        <ScrollView className="flex-1" contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 32 }}>
           {report && <ScoreGauge score={report.overallScore} />}
 
           {report && (
             <>
               <View className="flex-row gap-2">
-                <StatChip label="Deck Size" value={report.deckSize} />
+                <StatChip label="Tamaño" value={report.deckSize} />
                 <StatChip
                   label="Combo Rate"
                   value={report.starterCount > 0
@@ -442,15 +477,15 @@ export default function ConsistencyScreen() {
                 />
               </View>
               <View className="flex-row gap-2">
-                <StatChip label="Monsters" value={report.monsterCount} color="#88aaff" />
-                <StatChip label="Spells" value={report.spellCount} color="#50c878" />
-                <StatChip label="Traps" value={report.trapCount} color="#ff8844" />
+                <StatChip label="Monstruos" value={report.monsterCount} color="#88aaff" />
+                <StatChip label="Magias" value={report.spellCount} color="#50c878" />
+                <StatChip label="Trampas" value={report.trapCount} color="#ff8844" />
               </View>
               <View className="flex-row gap-2">
-                <StatChip label="Starters" value={report.starterCount} color={ROLE_COLORS.starter} />
-                <StatChip label="Extenders" value={report.extenderCount} color={ROLE_COLORS.extender} />
-                <StatChip label="Handtraps" value={report.handtrapCount} color={ROLE_COLORS.handtrap} />
-                <StatChip label="Garnets" value={report.brickCount} color={ROLE_COLORS.garnets} />
+                <StatChip label="Starters" value={report.starterCount} color="#50c878" />
+                <StatChip label="Extenders" value={report.extenderCount} color="#88aaff" />
+                <StatChip label="Handtraps" value={report.handtrapCount} color="#ff8844" />
+                <StatChip label="Garnets" value={report.brickCount} color="#e05050" />
               </View>
             </>
           )}
@@ -458,12 +493,9 @@ export default function ConsistencyScreen() {
           {validation && (
             <View className="bg-surface rounded-xl p-4 gap-2">
               <View className="flex-row items-center gap-2">
-                <View style={{
-                  width: 8, height: 8, borderRadius: 4,
-                  backgroundColor: validation.valid ? "#50c878" : "#e05050",
-                }} />
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: validation.valid ? "#50c878" : "#e05050" }} />
                 <Text className="text-text text-xs font-semibold">
-                  {validation.valid ? "Deck is legal" : "Deck has issues"}
+                  {validation.valid ? "Mazo legal" : "El mazo tiene problemas"}
                 </Text>
               </View>
               {validation.errors.map((e, i) => (
@@ -480,46 +512,35 @@ export default function ConsistencyScreen() {
               ))}
             </View>
           )}
-
-          <View className="bg-surface rounded-xl p-4">
-            <Text className="text-muted text-xs font-semibold uppercase mb-2">Roles (tap a card in By Card)</Text>
-            <View className="flex-row flex-wrap gap-2">
-              {(Object.entries(ROLE_LABELS) as [CardRole, string][]).map(([role, label]) => (
-                <View key={role} style={{
-                  flexDirection: "row", alignItems: "center", gap: 4,
-                  backgroundColor: ROLE_COLORS[role] + "22", borderRadius: 99,
-                  paddingHorizontal: 8, paddingVertical: 3,
-                }}>
-                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: ROLE_COLORS[role] }} />
-                  <Text style={{ color: ROLE_COLORS[role], fontSize: 11 }}>{label}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
         </ScrollView>
       )}
 
+      {/* By Card */}
       {activeTab === "cards" && (
         <View className="flex-1">
           <View className="flex-row items-center px-3 py-1.5 border-b border-border bg-surface">
-            <Text className="text-muted flex-1" style={{ fontSize: 10, textTransform: "uppercase" }}>Card</Text>
+            <Text className="text-muted flex-1" style={{ fontSize: 10, textTransform: "uppercase" }}>
+              Carta — toca para asignar rol
+            </Text>
             <Text className="text-muted" style={{ fontSize: 10, textTransform: "uppercase" }}>Prob.</Text>
           </View>
           <FlatList
             data={sortedMain}
             keyExtractor={(item) => String(item.card.id)}
+            contentContainerStyle={{ paddingBottom: 32 }}
             renderItem={({ item }) => (
               <CardRow
                 dc={item}
                 deckSize={deckSize}
                 goingFirst={goingFirst}
-                onSetRole={handleSetRole}
+                onPress={() => setRoleTarget(item)}
               />
             )}
           />
         </View>
       )}
 
+      {/* Simulator */}
       {activeTab === "simulator" && (
         <SimulatorPanel main={main} goingFirst={goingFirst} />
       )}
