@@ -16,8 +16,9 @@ config.resolver.nodeModulesPaths = [
   path.resolve(workspaceRoot, "node_modules"),
 ];
 
-// Resolve "source" field (TypeScript source) before "main" (compiled dist)
-config.resolver.resolverMainFields = ["react-native", "source", "browser", "main"];
+// Use default Metro resolver field order (react-native, browser, main)
+// Note: @yugioh/core is resolved via its "react-native" exports condition
+config.resolver.resolverMainFields = ["react-native", "browser", "main"];
 
 // Enable package exports
 config.resolver.unstable_enablePackageExports = true;
