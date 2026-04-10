@@ -1,0 +1,26 @@
+{
+  "name": "@yugioh/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@yugioh/core": "workspace:*",
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "node-cache": "^5.1.2",
+    "axios": "^1.9.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.2",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.3"
+  }
+}
