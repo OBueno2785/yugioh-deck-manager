@@ -40,3 +40,7 @@
     background: var(--color-muted);
   }
 }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

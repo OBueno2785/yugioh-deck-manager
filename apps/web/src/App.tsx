@@ -1,6 +1,7 @@
 import { Routes, Route, NavLink } from "react-router-dom";
 import CardSearchPage from "@/features/cards/CardSearchPage";
 import DeckBuilderPage from "@/features/deck-builder/DeckBuilderPage";
+import RecommenderPage from "@/features/recommender/RecommenderPage";
 
 export default function App() {
   return (
@@ -29,6 +30,15 @@ export default function App() {
           >
             Deck Builder
           </NavLink>
+          <NavLink
+            to="/recommender"
+            className={({ isActive }) =>
+              isActive ? "font-semibold" : "opacity-60 hover:opacity-100"
+            }
+            style={({ isActive }) => ({ color: isActive ? "var(--color-accent)" : "var(--color-text)" })}
+          >
+            Recommender
+          </NavLink>
         </nav>
       </header>
 
@@ -36,6 +46,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<CardSearchPage />} />
           <Route path="/deck-builder" element={<DeckBuilderPage />} />
+          <Route path="/recommender" element={<RecommenderPage />} />
         </Routes>
       </main>
     </div>
