@@ -657,3 +657,22 @@ body:not(.fd-selected) .fd-log .log-scroll { max-height: 56vh; }
 }
 .lv-steps { align-self: flex-start; }
 .lv-steps button { min-width: 52px; }
+
+/* ---------- Péndulo boca arriba en el Extra Deck ---------- */
+.pile-up {
+  position: absolute; top: 3px; right: 3px; z-index: 3; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; pointer-events: none;
+  background: var(--f-pend); border: 1.5px solid var(--accent); color: #fff; font: 700 11px/15px var(--data); text-align: center;
+}
+.pile-sec { margin: 4px 0 8px; font: 600 13px/1.3 var(--body); color: var(--muted); letter-spacing: .02em; }
+.pile-sec ~ .pile-sec { margin-top: 14px; }
+/* Cartas que no se pueden elegir para la jugada en curso (boca abajo en una Invocación por Péndulo, otras pilas) */
+.pile-grid.pile-off { opacity: .45; pointer-events: none; }
+@media (max-width: 599px) {
+  /* La pila mide 50px: el nombre sobra (queda en aria-label y en la ventana) y la marca va chica para no tapar la carta */
+  .pile .pile-count .pile-name { display: none; }
+  /* Va abajo a la izquierda, sobre el número: así no tapa el nombre ni la ilustración de la carta de encima */
+  .pile-up {
+    top: auto; right: auto; bottom: 15px; left: 2px; min-width: 13px; height: 13px; padding: 0 3px; border-radius: 7px;
+    border-width: 1px; font: 700 9.5px/11px var(--data);
+  }
+}

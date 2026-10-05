@@ -159,6 +159,11 @@
   }
   // field.js marca extraFaceUp al mandar un Péndulo boca arriba al Extra Deck (faceUp: estados viejos)
   const faceUpInExtra = (c, inst) => !!(c.type & T.PENDULUM) && (!db.isExtra(c) || !!(inst && (inst.extraFaceUp || inst.faceUp || inst.summonMethod)));
+  /** Un Péndulo boca arriba en el Extra Deck solo se puede Invocar por Péndulo, no por Fusión, Sincronía, Xyz ni Link. */
+  const faceUpExtraOnlyPendulum = (method) => 'Un monstruo de Péndulo boca arriba en el Extra Deck no se puede hacer su '
+    + METHOD_LABELS[method] + ': boca arriba solo se puede Invocar por Péndulo (o con un efecto que lo invoque).';
+  // Xyz/Link de Péndulo que su texto deja Invocar por Péndulo desde el Extra Deck ("If you can Pendulum Summon Level 7...")
+  const PEND_FACEUP_LEVEL = /If you can Pendulum Summon Level (\d+), you can Pendulum Summon this face-up card in your Extra Deck/i;
   /** Cómo se invocó antes (field.js guarda properSummon al dejar el campo; summonMethod mientras sigue en él). */
   const properOf = (inst) => (inst && (inst.properSummon || inst.summonMethod)) || null;
   const hasLevel = (c) => db.isMonster(c) && !(c.type & (T.XYZ | T.LINK));
@@ -1088,6 +1093,7 @@
       if (!(c.type & bit)) { err(v, q(c.name) + ' no es un monstruo ' + label + '.'); return; }
       if (new RegExp('Cannot be ' + word + ' Summoned', 'i').test(reqText)) err(v, q(c.name) + ' no se puede Invocar por ' + { synchro: 'Sincronía', xyz: 'Xyz', link: 'Link' }[method] + ': usa su propio procedimiento (Invocación Especial).');
       if (!fromExtra) err(v, 'La ' + METHOD_LABELS[method] + ' es desde el Extra Deck.');
+      else if (db.isExtra(c) && faceUpInExtra(c, loc.inst)) err(v, faceUpExtraOnlyPendulum(method));
       sourceOrMain(v, S, req, t, method, true);
       if (!xs.length) err(v, 'Elige los materiales.');
       else {
@@ -1101,6 +1107,7 @@
       sourceOrMain(v, S, req, t, method, false);
       if (/Cannot be Fusion Summoned/i.test(reqText)) err(v, q(c.name) + ' no se puede Invocar por Fusión: usa su propio procedimiento (Invocación Especial).');
       if (!fromExtra) err(v, 'La Invocación por Fusión es desde el Extra Deck.');
+      else if (db.isExtra(c) && faceUpInExtra(c, loc.inst)) err(v, faceUpExtraOnlyPendulum(method));
       if (/Must (?:first )?be Special Summoned\b/i.test(reqText) && !/Fusion Summon/i.test(reqText) && !req.source) {
         warn(v, q(c.name) + ' se invoca con su propio procedimiento (no con Polimerización).');
       }
@@ -1381,9 +1388,14 @@
       if (!c) { err(v, 'No encuentro esa carta.'); return; }
       v.from[uid] = loc.area;
       if (!db.isMonster(c)) { err(v, q(c.name) + ' no es un monstruo.'); return; }
-      if (!hasLevel(c)) err(v, q(c.name) + ' no tiene Nivel: no se puede Invocar por Péndulo.');
-      else if (!(levelOf(c, loc.inst) > low && levelOf(c, loc.inst) < high)) {
-        err(v, q(c.name) + ' es Nivel ' + levelOf(c, loc.inst) + '; con Escalas ' + low + ' y ' + high + ' solo puedes invocar Niveles ' + (low + 1) + ' a ' + (high - 1) + '.');
+      // Un Xyz de Péndulo no tiene Nivel, pero su texto puede dejar invocarlo boca arriba desde el Extra Deck
+      // ("If you can Pendulum Summon Level 7, you can Pendulum Summon this face-up card in your Extra Deck")
+      const clause = !hasLevel(c) && loc.area === 'extra' && faceUpInExtra(c, loc.inst) ? PEND_FACEUP_LEVEL.exec(c.desc || '') : null;
+      const lv = hasLevel(c) ? levelOf(c, loc.inst) : clause ? Number(clause[1]) : null;
+      if (lv == null) err(v, q(c.name) + ' no tiene Nivel: no se puede Invocar por Péndulo.');
+      else if (!(lv > low && lv < high)) {
+        err(v, q(c.name) + (clause ? ' pide poder Invocar por Péndulo Nivel ' + lv : ' es Nivel ' + lv)
+          + '; con Escalas ' + low + ' y ' + high + ' solo puedes invocar Niveles ' + (low + 1) + ' a ' + (high - 1) + '.');
       }
       if (loc.area === 'extra') {
         if (!faceUpInExtra(c, loc.inst)) err(v, 'Desde el Extra Deck solo puedes invocar monstruos de Péndulo boca arriba.');

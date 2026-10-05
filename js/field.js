@@ -276,6 +276,8 @@
     return { loc, inst, c: db.get(inst.id) };
   }
   const q = (name) => '«' + name + '»';
+  /** Lista en español: "A", "A y B", "A, B y C". */
+  const listEs = (xs) => (xs.length > 1 ? xs.slice(0, -1).join(', ') + ' y ' + xs[xs.length - 1] : xs.join(''));
   const nameById = (id) => { const c = db.get(id); return c ? c.name : 'Carta ' + id; };
   const nameOf = (uid) => { const f = find(uid); return f ? nameById(f.inst.id) : '?'; };
   const fromKey = (loc) => (loc.area === 'field' ? loc.zone : loc.area);
@@ -303,6 +305,17 @@
   };
   /** Vuelve a la mano, al mazo o boca abajo al Extra Deck: ya no cuenta cómo se invocó antes. */
   const forget = (c) => { delete c.properSummon; return c; };
+  /** Regla del Péndulo: un monstruo de Péndulo en el campo que iría al cementerio se coloca boca arriba en el Extra Deck,
+   * como Monstruo o como Mágica (Escala, equipada o colocada boca abajo) y aunque esté boca abajo.
+   * No cuentan los materiales Xyz ni las cartas cuya invocación o activación fue negada (opts.negated). */
+  const pendulumToExtra = (from, c) => !!(from && from.area === 'field' && from.index === 0 && c && db.isMonster(c)
+    && c.type & T.PENDULUM && (isMonsterZone(from.zone) || ST.includes(from.zone)));
+  const PEND_TOAST = 'Los monstruos de Péndulo que dejan el campo van boca arriba al Extra Deck';
+  // Xyz/Link de Péndulo: solo se pueden Invocar por Péndulo desde el Extra Deck si su texto lo dice (no tienen Nivel)
+  const PEND_FACEUP_LEVEL = /If you can Pendulum Summon Level (\d+), you can Pendulum Summon this face-up card in your Extra Deck/i;
+  const pendFromExtra = (c) => !(c.type & (T.XYZ | T.LINK)) || PEND_FACEUP_LEVEL.test(c.desc || '');
+  /** Un Péndulo boca arriba en el Extra Deck: solo se invoca por Péndulo y puede activar efectos desde ahí. */
+  const faceUpInExtra = (loc, inst) => !!(loc && loc.area === 'extra' && inst && inst.extraFaceUp);
 
   /** Mueve una carta a mano (sin declarar nada; queda en el registro como movimiento manual).
    * dest: 'hand' | pila | zona; opts: { faceDown, def, bottom, overlay, attach } */
@@ -338,10 +351,27 @@
     else if (dest === 'extra') {
       resetCard(card);
       if (!db.isExtra(c) && !(c.type & T.PENDULUM)) { S.hand.push(forget(card)); toast('Esa carta no va en el Extra Deck: volvió a la mano'); where = 'Mano'; }
-      else { card.extraFaceUp = !!(c.type & T.PENDULUM); if (!card.extraFaceUp) forget(card); S.extra.push(card); }
+      else {
+        // Un Péndulo del Mazo Principal solo puede estar boca arriba en el Extra Deck; uno de Fusión/Sincronía/Xyz
+        // vuelve boca abajo (así regresa cuando un efecto lo devuelve) salvo que se pida boca arriba
+        const pend = !!(c.type & T.PENDULUM);
+        card.extraFaceUp = pend && (!db.isExtra(c) || opts.faceUp === true);
+        if (!card.extraFaceUp) forget(card);
+        S.extra.push(card);
+        if (pend) where = 'Extra Deck (boca ' + (card.extraFaceUp ? 'arriba' : 'abajo') + ')';
+      }
+    }
+    else if (dest === 'gy' && !opts.negated && pendulumToExtra(loc, c)) {
+      // "Al cementerio" (destruido, sacrificado, enviado...) de un Péndulo en el campo
+      resetCard(card).extraFaceUp = true;
+      S.extra.push(card);
+      where = 'Extra Deck (boca arriba)';
+      toast(PEND_TOAST);
     }
     else if (dest === 'gy' || dest === 'ban') {
       resetCard(card);
+      // Un Péndulo cuya invocación o activación fue negada sí va al cementerio
+      if (opts.negated && dest === 'gy') where = 'Cementerio (invocación o activación negada)';
       // Las cartas del Extra Deck vuelven al Extra si se mandan a la mano o al mazo; al cementerio van normal
       S[dest].push(card);
     } else {
@@ -489,11 +519,13 @@
       if (pend && scalesSet()) add('pendulum', 'Invocación por Péndulo');
     } else if (loc.area === 'extra') {
       const blocked = materialsInfo(c).blocked; // "Cannot be Synchro Summoned" (p. ej. Ultimaya Tzolkin)
+      // Boca arriba en el Extra Deck (un Péndulo que dejó el campo) solo se puede Invocar por Péndulo
+      const faceUp = db.isExtra(c) && faceUpInExtra(loc, inst);
       [[T.SYNCHRO, 'synchro'], [T.XYZ, 'xyz'], [T.LINK, 'link'], [T.FUSION, 'fusion']].forEach(([bit, m]) => {
-        if (db.isExtra(c) && c.type & bit && !blocked) add(m, METHOD[m]);
+        if (db.isExtra(c) && c.type & bit && !blocked && !faceUp) add(m, METHOD[m]);
       });
       addProc();
-      if (pend && scalesSet() && (!db.isExtra(c) || inst.extraFaceUp)) add('pendulum', 'Invocación por Péndulo');
+      if (pend && scalesSet() && (!db.isExtra(c) || (inst.extraFaceUp && pendFromExtra(c)))) add('pendulum', 'Invocación por Péndulo');
       add('special', 'Invocación Especial…');
     } else {
       if (c.type & T.RITUAL && loc.area !== 'ban') add('ritual', METHOD.ritual);
@@ -546,10 +578,10 @@
     if (!r) return;
     const card = resetCard(r.card);
     const c = db.get(card.id);
-    if (dest === 'gy' && r.from.area === 'field' && r.from.index === 0 && c && db.isMonster(c) && c.type & T.PENDULUM) {
+    if (dest === 'gy' && pendulumToExtra(r.from, c)) {
       card.extraFaceUp = true;
       S.extra.push(card);
-      return;
+      return 'extra';
     }
     if (dest === 'back') {
       // "devolverlos al Mazo/Extra Deck" (costos de algunos procedimientos, como Vidolium)
@@ -608,7 +640,11 @@
     const mats = req.materials || [];
     let under = [];
     if (req.method === 'xyz') mats.forEach((m) => { under = under.concat(takeStack(m).map(resetCard)); });
-    else mats.forEach((m) => sendMaterial(m, req.matDest === 'ban' || req.matDest === 'back' ? req.matDest : 'gy'));
+    else {
+      const toExtra = [];
+      mats.forEach((m) => { const n = nameOf(m); if (sendMaterial(m, req.matDest === 'ban' || req.matDest === 'back' ? req.matDest : 'gy') === 'extra') toExtra.push(q(n)); });
+      if (toExtra.length) { e.text += ' · ' + listEs(toExtra) + ' va' + (toExtra.length > 1 ? 'n' : '') + ' boca arriba al Extra Deck'; toast(PEND_TOAST); }
+    }
     const r = detach(req.uid);
     if (r) placeSummoned(r.card, req.zone, req.method, req.position, under);
     afterPlay(v);
@@ -650,7 +686,15 @@
     if (uid === p.uid && p.method !== 'pendulum') { toast('Esa es la carta que vas a invocar'); return; }
     const i = p.picks.indexOf(uid);
     if (i >= 0) p.picks.splice(i, 1);
-    else p.picks.push(uid);
+    else {
+      // Por Péndulo solo se invoca desde la mano o boca arriba del Extra Deck (no del cementerio, el mazo ni desterradas)
+      const f = p.method === 'pendulum' ? find(uid) : null;
+      if (f && !(f.loc.area === 'hand' || (faceUpInExtra(f.loc, f.inst) && pendFromExtra(f.c)))) {
+        toast('Solo monstruos de Péndulo de la mano o boca arriba del Extra Deck');
+        return;
+      }
+      p.picks.push(uid);
+    }
     render();
   }
 
@@ -698,19 +742,30 @@
   /* Invocación por Péndulo: varias cartas a la vez. Las zonas tocadas se usan en orden; las demás se eligen solas.
    * opts.taken (zonas ya repartidas en esta invocación) lo entiende checkPlacement de YGO.rules. */
   function pendAssign(p) {
-    const used = [];
     const manual = p.zones.slice();
-    return p.picks.filter((u) => find(u)).map((uid) => {
-      const f = find(uid);
-      let zone = manual.shift() || null;
-      if (!zone) {
-        zone = zoneOrder(f.c, f.loc.area, 'pendulum').find((z) => !used.includes(z) && !S.zones[z].length
-          && !(EMZ.includes(z) && used.some((u) => EMZ.includes(u)))
-          && checkPlacement(S, uid, z, { method: 'pendulum', taken: used.slice() }).ok) || null;
+    const asg = p.picks.filter((u) => find(u)).map((uid) => ({ uid, zone: manual.shift() || null }));
+    const taken = asg.filter((a) => a.zone).map((a) => a.zone);
+    const auto = asg.filter((a) => !a.zone);
+    const fits = (uid, z, used) => !S.zones[z].length && !used.includes(z)
+      && !(EMZ.includes(z) && used.some((u) => EMZ.includes(u)))
+      && checkPlacement(S, uid, z, { method: 'pendulum', taken: used.slice() }).ok;
+    // Zonas posibles de cada carta sin zona elegida: las del Extra Deck solo van a la Zona Extra o a una zona apuntada
+    const cands = new Map(auto.map((a) => [a, zoneOrder(find(a.uid).c, find(a.uid).loc.area, 'pendulum').filter((z) => fits(a.uid, z, taken))]));
+    // Las más limitadas primero (las del Extra Deck) y, si una combinación no deja sitio a otra carta, se prueba otra
+    const order = auto.slice().sort((a, b) => cands.get(a).length - cands.get(b).length);
+    const fill = (i, used) => {
+      if (i >= order.length) return true;
+      const a = order[i];
+      for (const z of cands.get(a)) {
+        if (!fits(a.uid, z, used)) continue;
+        a.zone = z;
+        if (fill(i + 1, used.concat(z))) return true;
+        a.zone = null;
       }
-      if (zone) used.push(zone);
-      return { uid, zone };
-    });
+      return false;
+    };
+    fill(0, taken.slice());
+    return asg;
   }
   /** Es una sola invocación: req.uid/req.zone son la primera carta y req.uids/req.zones el grupo completo. */
   const pendReq = (p, asg) => Object.assign({
@@ -722,7 +777,8 @@
     if (!asg.length) return fail('Elige al menos un monstruo para invocar.');
     return merge(checkSummon(pendReq(p, asg)), ...asg.map((a) => (a.zone
       ? checkPlacement(S, a.uid, a.zone, { method: 'pendulum', taken: asg.filter((x) => x !== a && x.zone).map((x) => x.zone) })
-      : fail(q(nameOf(a.uid)) + ': no queda una zona libre válida.'))));
+      // El mismo texto que usan las reglas: así el aviso no sale dos veces
+      : fail('No hay una zona válida libre para ' + q(nameOf(a.uid)) + '.'))));
   }
 
   function confirmPendulum() {
@@ -739,11 +795,17 @@
     selected = null;
     snapshot();
     const names = asg.map((a) => q(nameOf(a.uid)));
+    // De dónde sale cada carta y a qué zona va: el registro sirve para repetir el combo
+    const details = asg.map((a, i) => {
+      const f = find(a.uid);
+      return names[i] + (f && f.loc.area === 'extra' ? ' (del Extra Deck)' : '') + (a.zone ? ' en ' + placeName(a.zone) : '');
+    });
     // Es una sola invocación: se avisa a las reglas una vez, con el grupo completo
     const e = commit('commitSummon', [pendReq(p, asg), v], v,
       { kind: 'summon', text: 'Invocación por Péndulo de ' + names.join(', ') + (p.position === 'def' ? ', en DEF' : '') }, null);
-    const missing = names.slice(1).filter((n) => !String(e.text).includes(n));
-    if (missing.length) e.text += ' (junto con ' + missing.join(', ') + ')';
+    if (String(e.text).includes(names.join(', '))) e.text = String(e.text).replace(names.join(', '), details.join(', '));
+    else e.text += ' · ' + details.join(', ');
+    if (p.position === 'def' && !/en DEF/.test(e.text)) e.text += ', en DEF';
     asg.forEach((a) => {
       const r = detach(a.uid);
       if (r) placeSummoned(r.card, a.zone, 'pendulum', p.position);
@@ -953,8 +1015,9 @@
     else if (area === 'gy' && /\bbanish this card from your (?:GY|Graveyard)\b/i.test(cost)) { dest = 'ban'; text = 'se destierra del cementerio'; }
     else if (area === 'mzone' && /\bTribute this card\b/i.test(cost)) { dest = 'gy'; text = 'se sacrifica'; }
     if (!dest) return '';
-    sendMaterial(uid, dest);
-    return q(f.c.name) + ' ' + text;
+    const went = sendMaterial(uid, dest);
+    if (went === 'extra') toast(PEND_TOAST);
+    return q(f.c.name) + ' ' + text + (went === 'extra' ? ' (va boca arriba al Extra Deck)' : '');
   }
 
   /** Errores de momento para lo que solo se hace en tu Fase Principal con la cadena vacía (si no hay reglas). */
@@ -1184,7 +1247,8 @@
         if (loc.area === 'gy' || loc.area === 'ban') add('Activar efecto…', fx, 'primary');
         opts.forEach((o, i) => add(o.label, o.action, i === 0 && loc.area !== 'gy' && loc.area !== 'ban' ? 'primary' : ''));
         if (c.type & T.PENDULUM && loc.area === 'hand') add('Activar como Escala de Péndulo', () => activateScale(uid));
-        if (loc.area === 'hand') add('Activar efecto…', fx);
+        // Boca arriba en el Extra Deck hay efectos que se activan desde ahí ("If this card is face-up in your Extra Deck")
+        if (loc.area === 'hand' || faceUpInExtra(loc, inst)) add('Activar efecto…', fx);
       } else if (loc.area === 'hand') {
         add('Activar', () => activateCard(uid), db.isSpell(c) ? 'primary' : '');
         add('Colocar (boca abajo)', () => setSpellTrap(uid), db.isTrap(c) ? 'primary' : '');
@@ -1211,8 +1275,16 @@
     add('Mover a una zona…', () => startPending('move', uid));
     if (db.isMonster(c) && !(onField && isTop && isMonsterZone(loc.zone))) add('Acoplar como material…', () => startPending('attach', uid));
     if (loc.area !== 'gy') add('Al cementerio', () => move(uid, 'gy'));
+    // Un Péndulo cuya Invocación (Normal, Especial o por Péndulo) o activación como Escala fue negada sí va al cementerio
+    if (pendulumToExtra(loc, c)) add('Al cementerio (invocación negada)', () => move(uid, 'gy', { negated: true }));
     if (loc.area !== 'ban') add('Desterrar', () => move(uid, 'ban'));
-    if (extraMon || (c.type & T.PENDULUM && onField)) { if (loc.area !== 'extra') add('Al Extra Deck', () => move(uid, 'extra')); }
+    const pendMon = db.isMonster(c) && !!(c.type & T.PENDULUM);
+    if (loc.area !== 'extra') {
+      // Péndulo del Mazo Principal: solo boca arriba. De Fusión/Sincronía/Xyz: boca arriba (dejó el campo) o boca abajo (regresa)
+      if (pendMon) add('Al Extra Deck (boca arriba)', () => move(uid, 'extra', { faceUp: true }));
+      if (pendMon && extraMon) add('Al Extra Deck (boca abajo)', () => move(uid, 'extra', { faceUp: false }));
+      if (!pendMon && extraMon) add('Al Extra Deck', () => move(uid, 'extra'));
+    }
     if (loc.area !== 'hand' && !extraMon) add('A la mano', () => move(uid, 'hand'));
     if (!extraMon) {
       add('Al mazo (arriba)', () => move(uid, 'deck'));
@@ -1293,7 +1365,8 @@
     const stack = S.zones[zone];
     if (stack.length && stack[0].uid === uid) return;
     const mon = db.isMonster(c);
-    const xyz = mon && !!(c.type & T.XYZ);
+    // Boca arriba en el Extra Deck: no se puede hacer su Invocación Xyz/Fusión/Sincronía (summonOptions ya las quita)
+    const xyz = mon && !!(c.type & T.XYZ) && !faceUpInExtra(loc, f.inst);
     if (stack.length) {
       // Otra Mágica de Campo de la mano: se activa o coloca y la anterior va al cementerio
       if (zone === 'fz' && !mon && loc.area === 'hand' && c.type & T.FIELD) {
@@ -1458,11 +1531,22 @@
     if (pileOpen === 'deck') list.sort((a, b) => db.get(a.id).name.localeCompare(db.get(b.id).name));
     if (pileOpen === 'gy' || pileOpen === 'ban') list.reverse();
     const picking = pending && pending.kind === 'summon';
+    // Por Péndulo solo se invoca desde la mano o boca arriba del Extra Deck: lo demás se ve apagado y no se elige
+    const pendPick = !!(picking && pending.method === 'pendulum');
     $('#modal-title').textContent = PILE_NAMES[pileOpen] + ' (' + list.length + ')';
-    $('#modal-body').innerHTML = (picking ? '<p class="hint">Toca las cartas para elegirlas. Cierra la ventana cuando termines.</p>'
-      : pileOpen === 'deck' ? '<p class="hint">Ordenado por nombre. Al sacar una carta, el mazo se baraja.</p>' : '')
-      + (list.length ? '<div class="pile-grid">' + list.map((x) => tileFor(x, true)).join('') + '</div>'
-        : '<p class="hint">No hay cartas aquí.</p>');
+    const grid = (l, off) => '<div class="pile-grid' + (off ? ' pile-off' : '') + '">' + l.map((x) => tileFor(x, true)).join('') + '</div>';
+    let cards = list.length ? grid(list, pendPick && pileOpen !== 'extra') : '<p class="hint">No hay cartas aquí.</p>';
+    if (pileOpen === 'extra' && list.some((x) => x.extraFaceUp)) {
+      // Boca arriba (Péndulo, a la vista de ambos jugadores) primero, el más reciente adelante
+      const up = list.filter((x) => x.extraFaceUp).reverse(), down = list.filter((x) => !x.extraFaceUp);
+      cards = '<h3 class="pile-sec">Boca arriba · ' + up.length + '</h3>' + grid(up)
+        + '<h3 class="pile-sec">Boca abajo · ' + down.length + (pendPick ? ' (no se pueden Invocar por Péndulo)' : '') + '</h3>'
+        + (down.length ? grid(down, pendPick) : '<p class="hint">No hay cartas boca abajo.</p>');
+    }
+    $('#modal-body').innerHTML = (pendPick ? '<p class="hint">Toca las cartas para elegirlas: de la mano, o del Extra Deck si están boca arriba.</p>'
+      : picking ? '<p class="hint">Toca las cartas para elegirlas. Cierra la ventana cuando termines.</p>'
+        : pileOpen === 'deck' ? '<p class="hint">Ordenado por nombre. Al sacar una carta, el mazo se baraja.</p>' : '')
+      + cards;
     const foot = $('#modal-foot');
     foot.innerHTML = '';
     if (pileOpen === 'deck' && !picking) {
@@ -1518,11 +1602,18 @@
 
   function pileHtml(p) {
     const list = S[p];
-    const top = list.length ? (p === 'deck' || p === 'extra' ? '<div class="card back"></div>' : tileFor(list[list.length - 1], true)) : '';
-    const target = pending && (pending.kind === 'move' || pending.kind === 'summon');
+    // En el Extra Deck, los Péndulo boca arriba se ven encima (el último que llegó)
+    const up = p === 'extra' ? list.filter((x) => x.extraFaceUp) : [];
+    const top = !list.length ? '' : up.length ? tileFor(up[up.length - 1], true)
+      : p === 'deck' || p === 'extra' ? '<div class="card back"></div>' : tileFor(list[list.length - 1], true);
+    // Por Péndulo solo se invoca desde la mano o del Extra Deck: las demás pilas no son destino
+    const target = pending && (pending.kind === 'move'
+      || (pending.kind === 'summon' && (pending.method !== 'pendulum' || p === 'extra')));
     return '<div class="zone-slot pile z-' + p + (target ? ' target' : '') + '" data-zone="' + p + '" tabindex="0" aria-label="' + PILE_NAMES[p] + '">'
       + top
-      + '<span class="pile-count">' + PILE_NAMES[p] + ' · ' + list.length + '</span></div>';
+      + (up.length ? '<span class="pile-up" title="Péndulo boca arriba en el Extra Deck">' + up.length + ' ▲</span>' : '')
+      // En pantallas angostas solo se ve el número (el nombre está en aria-label y en la ventana de la pila)
+      + '<span class="pile-count"><span class="pile-name">' + PILE_NAMES[p] + ' · </span>' + list.length + '</span></div>';
   }
 
   /** Zonas candidatas, destino elegido y zonas apuntadas por Links, para dibujar el tablero. */
