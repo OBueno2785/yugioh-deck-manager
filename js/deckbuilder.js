@@ -17,7 +17,8 @@
   const persist = () => {
     prefs.lastDeckId = current.id;
     store.save(decks);
-    store.savePrefs(prefs);
+    // Se mezcla con lo guardado: el campo y la prueba de mano guardan sus propias preferencias (fieldStrict, handSize)
+    store.savePrefs(Object.assign(store.prefs(), { lastDeckId: current.id, useBanlist: prefs.useBanlist }));
   };
 
   /* ---------- Avisos ---------- */

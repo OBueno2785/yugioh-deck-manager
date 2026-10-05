@@ -82,8 +82,14 @@
       const x = text[i];
       if (x === '"') q = !q;
       else if (!q && x === '(') depth++;
-      else if (!q && x === ')') depth = Math.max(0, depth - 1);
-      else if (x === '.' && !q && depth === 0 && text[i + 1] === ' ' && /[A-Z●("*]/.test(text[i + 2] || '')) {
+      else if (!q && x === ')') {
+        depth = Math.max(0, depth - 1);
+        // "...(This is treated as a Synchro Summon.) You can only..." también cierra la oración
+        if (depth === 0 && text[i - 1] === '.' && text[i + 1] === ' ' && /[A-Z●("*]/.test(text[i + 2] || '')) {
+          out.push(text.slice(start, i + 1).trim());
+          start = i + 2;
+        }
+      } else if (x === '.' && !q && depth === 0 && text[i + 1] === ' ' && /[A-Z●("*]/.test(text[i + 2] || '')) {
         out.push(text.slice(start, i + 1).trim());
         start = i + 2;
       }
@@ -114,61 +120,87 @@
     return html + '<span class="t-eff">' + inline(rest) + '</span>';
   }
 
-  /** Convierte el texto de la carta en párrafos con clases según su papel. */
-  function formatText(c) {
+  /**
+   * Divide el texto de la carta en bloques según su papel (lo usan formatText y YGO.rules).
+   * kind: 'flavor' | 'sep' | 'head' | 'note' | 'bullet' | 'materials' | 'limit' | 'req' | 'effect'.
+   * text: texto del bloque; parts: oraciones del efecto; head: 'pendulum effect' | 'monster effect' | 'flavor text'.
+   */
+  function textBlocks(c) {
     const desc = (c.desc || '').replace(/\r\n?/g, '\n');
-    if (c.type & db.T.NORMAL && !(c.type & db.T.PENDULUM)) {
-      return '<p class="t-flavor">' + inline(desc).replace(/\n/g, '<br>') + '</p>';
-    }
+    if (c.type & db.T.NORMAL && !(c.type & db.T.PENDULUM)) return [{ kind: 'flavor', text: desc }];
     const blocks = [];
     const isExtraOrRitual = db.isExtra(c) || (c.type & db.T.RITUAL && db.isMonster(c));
     let first = true;
     for (const raw of desc.split('\n')) {
       const line = raw.trim();
       if (!line) continue;
-      if (/^-{5,}$/.test(line)) { blocks.push('<hr class="t-sep">'); continue; }
+      if (/^-{5,}$/.test(line)) { blocks.push({ kind: 'sep' }); continue; }
       const head = line.match(/^\[\s*(Pendulum Effect|Monster Effect|Flavor Text)\s*\]$/i);
       if (head) {
-        blocks.push('<p class="t-head">' + ({ 'pendulum effect': 'Efecto de Péndulo', 'monster effect': 'Efecto de Monstruo', 'flavor text': 'Texto de ambientación' }[head[1].toLowerCase()]) + '</p>');
+        blocks.push({ kind: 'head', head: head[1].toLowerCase() });
         first = true;
         continue;
       }
-      if (line.startsWith('*')) { blocks.push('<p class="t-note">' + inline(line) + '</p>'); continue; }
-      if (line.startsWith('●')) {
-        blocks.push('<p class="t-bullet">' + colorEffect(line.replace(/^●\s*/, '')) + '</p>');
-        continue;
-      }
+      if (line.startsWith('*')) { blocks.push({ kind: 'note', text: line }); continue; }
+      if (line.startsWith('●')) { blocks.push({ kind: 'bullet', text: line.replace(/^●\s*/, '') }); continue; }
+      // "(This card's original Level is always treated as 12.)": aclaración, no materiales (los materiales pueden venir después)
+      if (first && db.isExtra(c) && /^\(.*\)$/.test(line)) { blocks.push({ kind: 'note', text: line }); continue; }
       // Materiales de Fusión/Sincronía/Xyz/Link: primera línea sin punto final
       if (first && isExtraOrRitual && !/\.$/.test(line) && db.isExtra(c)) {
-        blocks.push('<p class="t-req"><span class="t-tag">Materiales</span>' + inline(line) + '</p>');
+        blocks.push({ kind: 'materials', text: line });
         first = false;
         continue;
       }
       first = false;
+      // Una línea que es solo una aclaración ("(This card is not treated as a "Cyber" card.)") no es un efecto
+      if (/^\(.*\)$/.test(line) && sentences(line).length === 1 && !REQUIREMENT.test(line)) { blocks.push({ kind: 'note', text: line }); continue; }
       // Agrupa oraciones: cada activación (":" o ";") o restricción abre un párrafo nuevo
       let cur = null;
-      const flush = () => { if (cur) blocks.push(cur.html()); cur = null; };
-      for (const sen of sentences(line)) {
+      const flush = () => { if (cur) { cur.text = cur.parts.join(' '); blocks.push(cur); } cur = null; };
+      const lineStart = blocks.length;
+      const sens = sentences(line);
+      for (let k = 0; k < sens.length; k++) {
+        const sen = sens[k];
         if (RESTRICTION.test(sen)) {
           flush();
-          blocks.push('<p class="t-limit">' + inline(sen) + '</p>');
+          // "Once per turn, during your Main Phase: ..." es un efecto: las oraciones que siguen sin ":" ni ";" son parte de él
+          if (/^Once per (?:turn|Duel), /.test(sen) && (topIndex(sen, ':') >= 0 || topIndex(sen, ';') >= 0)) cur = { kind: 'limit', parts: [sen] };
+          else blocks.push({ kind: 'limit', text: sen });
           continue;
         }
-        if (REQUIREMENT.test(sen)) {
-          flush();
-          blocks.push('<p class="t-req"><span class="t-tag">Requisito</span>' + inline(sen) + '</p>');
-          continue;
+        if (REQUIREMENT.test(sen)) { flush(); blocks.push({ kind: 'req', text: sen }); continue; }
+        // Aclaración entre paréntesis ("(You do not use "Polymerization".)"): va con la restricción o el requisito
+        // anterior; al inicio del párrafo, si sigue más texto, queda como nota (no es un efecto)
+        if (!cur && /^\(.*\)$/.test(sen)) {
+          const prevBlock = blocks.length > lineStart ? blocks[blocks.length - 1] : null;
+          if (prevBlock && (prevBlock.kind === 'limit' || prevBlock.kind === 'req')) { prevBlock.text += ' ' + sen; continue; }
+          if (!prevBlock && k < sens.length - 1) { blocks.push({ kind: 'note', text: sen }); continue; }
         }
         const activates = topIndex(sen, ':') >= 0 || topIndex(sen, ';') >= 0;
-        if (!cur || activates) {
-          flush();
-          const parts = [sen];
-          cur = { parts, html: () => '<p class="t-effect">' + parts.map(colorEffect).join(' ') + '</p>' };
-        } else cur.parts.push(sen);
+        if (!cur || activates) { flush(); cur = { kind: 'effect', parts: [sen] }; } else cur.parts.push(sen);
       }
       flush();
     }
-    return blocks.join('');
+    return blocks;
+  }
+
+  const HEADS = { 'pendulum effect': 'Efecto de Péndulo', 'monster effect': 'Efecto de Monstruo', 'flavor text': 'Texto de ambientación' };
+
+  /** Convierte el texto de la carta en párrafos con clases según su papel. */
+  function formatText(c) {
+    return textBlocks(c).map((b) => {
+      switch (b.kind) {
+        case 'flavor': return '<p class="t-flavor">' + inline(b.text).replace(/\n/g, '<br>') + '</p>';
+        case 'sep': return '<hr class="t-sep">';
+        case 'head': return '<p class="t-head">' + HEADS[b.head] + '</p>';
+        case 'note': return '<p class="t-note">' + inline(b.text) + '</p>';
+        case 'bullet': return '<p class="t-bullet">' + colorEffect(b.text) + '</p>';
+        case 'materials': return '<p class="t-req"><span class="t-tag">Materiales</span>' + inline(b.text) + '</p>';
+        case 'limit': return '<p class="t-limit">' + inline(b.text) + '</p>';
+        case 'req': return '<p class="t-req"><span class="t-tag">Requisito</span>' + inline(b.text) + '</p>';
+        default: return '<p class="t-effect">' + b.parts.map(colorEffect).join(' ') + '</p>';
+      }
+    }).join('');
   }
 
   /** Línea de clase al estilo "[Monstruo|Efecto] Guerrero/TIERRA". */
@@ -216,5 +248,5 @@
       + '<span class="t-eff">Efecto</span><span class="t-limit">Restricción</span><span class="t-req-k">Requisito</span></p>';
   }
 
-  YGO.view = { tile, detail, images, esc, formatText };
+  YGO.view = { tile, detail, images, esc, formatText, textBlocks, colorEffect, topIndex, sentences, inline };
 })();

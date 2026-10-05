@@ -169,8 +169,23 @@
         <button id="fd-undo" type="button" title="Atajo: Ctrl+Z">Deshacer</button>
         <label class="lp"><span>LP</span><input id="fd-lp" type="number" step="100" inputmode="numeric"></label>
       </div>
-      <div id="fd-pending" class="pending" hidden><span id="fd-pending-text"></span><button id="fd-cancel" type="button">Cancelar</button></div>
+      <div id="fd-turn" class="fd-turn" role="group" aria-label="Turno y fase">
+        <p class="turn-info"><b id="fd-turn-n">Turno 1</b> · <span id="fd-turn-who" class="turn-who">Tu turno</span></p>
+        <div id="fd-phases" class="phases" role="group" aria-label="Fase"></div>
+        <div class="turn-btns">
+          <button id="fd-next-phase" type="button">Siguiente fase</button>
+          <button id="fd-pass" type="button">Pasar turno</button>
+          <button id="fd-log-btn" type="button" class="log-btn">Registro (0)</button>
+        </div>
+        <p id="fd-ns" class="ns-state"></p>
+        <label class="switch"><input id="fd-strict" type="checkbox"><span>Bloquear jugadas ilegales</span></label>
+      </div>
+      <div id="fd-pending" class="pending" hidden>
+        <div class="pending-main"><span id="fd-pending-text"></span><div id="fd-pick" class="pick-info" hidden></div></div>
+        <div class="pending-btns"><button id="fd-confirm" type="button" class="primary" hidden>Confirmar</button><button id="fd-cancel" type="button">Cancelar</button></div>
+      </div>
       <div class="board-wrap"><div id="board" class="board"></div></div>
+      <div id="fd-chain-strip" class="chain-strip" aria-label="Cadena" hidden></div>
       <div id="fd-hand-wrap" class="fd-hand-wrap">
         <header><h3>Mano</h3><span class="count" id="fd-hand-count">0</span></header>
         <div id="fd-hand" class="fd-hand"></div>
@@ -178,7 +193,9 @@
     </section>
     <aside id="fd-side" class="panel fd-side">
       <button id="fd-deselect" class="icon-btn fd-close" type="button" aria-label="Cerrar">×</button>
+      <section id="fd-chain" class="fd-chain" aria-label="Cadena"></section>
       <div id="fd-actions" class="fd-actions"></div>
+      <section id="fd-log" class="fd-log" aria-label="Registro"></section>
       <div id="fd-detail" class="fd-detail"></div>
     </aside>
   </main>
@@ -207,6 +224,7 @@
 <script src="js/cardview.js"></script>
 <script src="js/online.js"></script>
 <script src="js/game.js"></script>
+<script src="js/rules.js"></script>
 <script src="js/deckbuilder.js"></script>
 <script src="js/handtest.js"></script>
 <script src="js/field.js"></script>

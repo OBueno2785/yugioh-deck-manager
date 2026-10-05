@@ -204,18 +204,32 @@
   const write = (k, v) => {
     try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; }
   };
+  /** Preferencias guardadas; si lo guardado no es un objeto (p. ej. 'null'), se empieza de cero. */
+  const readPrefs = () => {
+    const p = read(PREF, {});
+    return p && typeof p === 'object' && !Array.isArray(p) ? p : {};
+  };
 
   const store = {
     /** Lista de mazos guardados; si no hay ninguno devuelve el mazo de ejemplo. */
     load() {
       let list = read(KEY, null);
+      if (Array.isArray(list)) list = list.filter((d) => d && typeof d === 'object');
       if (!Array.isArray(list) || !list.length) {
         const s = window.YGO_SAMPLE_DECK;
         list = [s ? deck.create(s.name, { main: s.main.slice(), extra: s.extra.slice(), side: s.side.slice() }) : deck.create()];
       }
+      // Códigos que la base ya no conoce (p. ej. cartas en línea cuyo caché se borró): se apartan para no romper la app
+      for (const d of list) {
+        for (const s of SECTIONS) {
+          if (!Array.isArray(d[s])) d[s] = [];
+          const bad = d[s].filter((id) => !db.get(id));
+          if (bad.length) { d[s] = d[s].filter((id) => db.get(id)); d.unknownIds = (d.unknownIds || []).concat(bad); }
+        }
+      }
       // Mazos compartidos en el proyecto: se agregan una sola vez a la lista guardada
-      const prefs = read(PREF, {});
-      const added = prefs.presetsAdded || [];
+      const prefs = readPrefs();
+      const added = Array.isArray(prefs.presetsAdded) ? prefs.presetsAdded : [];
       for (const p of window.YGO_PRESET_DECKS || []) {
         if (added.includes(p.presetId) || list.some((d) => d.presetId === p.presetId)) continue;
         const d = deck.create(p.name, { presetId: p.presetId });
@@ -229,7 +243,7 @@
       return list;
     },
     save(list) { return write(KEY, list); },
-    prefs() { return read(PREF, {}); },
+    prefs() { return readPrefs(); },
     savePrefs(p) { return write(PREF, p); },
   };
 
