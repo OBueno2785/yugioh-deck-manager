@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Simulador Yugioh</title>
+<meta name="description" content="Constructor de mazos, prueba de mano y campo de combos de Yu-Gi-Oh!">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Cinzel:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app" data-mode="builder">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Simulador <b>Yugioh</b></span></div>
+    <nav class="modes" aria-label="Modos">
+      <a class="mode active" href="#constructor" aria-current="page">Constructor</a>
+      <a class="mode" href="#mano">Prueba de mano</a>
+      <a class="mode" href="#campo">Campo</a>
+    </nav>
+    <p class="db-info"><span id="db-count">0</span> cartas · banlist <span id="banlist-name">TCG</span><span id="online-badge" class="online-badge" hidden title="Conectado a YGOPRODeck: imágenes y cartas nuevas">YGOPRODeck</span></p>
+  </header>
+
+  <main class="builder mode-pane" data-mode="constructor">
+    <aside class="panel detailpane" aria-label="Detalle de carta">
+      <button id="detail-close" class="icon-btn detail-close" type="button" aria-label="Cerrar detalle">×</button>
+      <div id="detail-body" class="detail-body"></div>
+      <div id="detail-actions" class="detail-actions" hidden>
+        <p id="copies" class="copies"></p>
+        <div class="btn-row">
+          <button id="act-add" class="primary" type="button">+ Principal</button>
+          <button id="act-side" type="button">+ Side</button>
+          <button id="act-remove" type="button">− Quitar</button>
+        </div>
+      </div>
+    </aside>
+
+    <section class="deckpane" aria-label="Mazo">
+      <div class="decktools">
+        <div class="deckpick">
+          <label class="sr" for="deck-select">Mazo</label>
+          <select id="deck-select"></select>
+          <button id="btn-new" type="button">Nuevo</button>
+          <button id="btn-rename" type="button">Renombrar</button>
+          <button id="btn-dup" type="button">Duplicar</button>
+          <button id="btn-del" type="button" class="ghost-danger">Eliminar</button>
+        </div>
+        <div class="deckacts">
+          <button id="btn-sort" type="button">Ordenar</button>
+          <button id="btn-clear" type="button">Vaciar</button>
+          <button id="btn-import" type="button">Importar .ydk</button>
+          <button id="btn-export" type="button" class="primary">Exportar .ydk</button>
+        </div>
+      </div>
+      <div class="deckstatus">
+        <div id="breakdown" class="breakdown"></div>
+        <label class="switch"><input id="opt-banlist" type="checkbox"><span>Aplicar banlist</span></label>
+        <p id="validity" class="validity"></p>
+      </div>
+      <div class="zones">
+        <section class="zone" data-section="main">
+          <header><h3>Mazo principal</h3><span class="count"></span></header>
+          <div class="grid"></div>
+        </section>
+        <section class="zone" data-section="extra">
+          <header><h3>Extra Deck</h3><span class="count"></span></header>
+          <div class="grid"></div>
+        </section>
+        <section class="zone" data-section="side">
+          <header><h3>Side Deck</h3><span class="count"></span></header>
+          <div class="grid"></div>
+        </section>
+        <p class="tips">Clic en una carta para ver su texto. Clic derecho o <kbd>Supr</kbd> sobre una carta del mazo la quita. Arrastra cartas entre secciones o de vuelta al buscador.</p>
+      </div>
+    </section>
+
+    <aside class="panel searchpane" aria-label="Buscador de cartas">
+      <div class="searchbar">
+        <label class="sr" for="q">Buscar carta</label>
+        <input id="q" type="search" placeholder="Nombre o texto de la carta" autocomplete="off" spellcheck="false">
+        <button id="btn-filters" type="button" aria-expanded="false" aria-controls="filters">Filtros</button>
+      </div>
+      <div id="filters" class="filters" hidden>
+        <label><span>Carta</span><select id="f-kind">
+          <option value="">Todas</option><option value="monster">Monstruo</option><option value="spell">Mágica</option><option value="trap">Trampa</option>
+        </select></label>
+        <label><span>Subtipo</span><select id="f-sub"></select></label>
+        <label class="monster-only"><span>Atributo</span><select id="f-attr"></select></label>
+        <label class="monster-only"><span>Tipo</span><select id="f-race"></select></label>
+        <div class="range monster-only"><span>Nivel / Rango / Link</span>
+          <input id="f-lvmin" type="number" min="0" max="13" placeholder="mín" inputmode="numeric">
+          <input id="f-lvmax" type="number" min="0" max="13" placeholder="máx" inputmode="numeric"></div>
+        <div class="range monster-only"><span>ATK</span>
+          <input id="f-atkmin" type="number" min="0" step="100" placeholder="mín" inputmode="numeric">
+          <input id="f-atkmax" type="number" min="0" step="100" placeholder="máx" inputmode="numeric"></div>
+        <div class="range monster-only"><span>DEF</span>
+          <input id="f-defmin" type="number" min="0" step="100" placeholder="mín" inputmode="numeric">
+          <input id="f-defmax" type="number" min="0" step="100" placeholder="máx" inputmode="numeric"></div>
+        <label><span>Banlist</span><select id="f-ban">
+          <option value="">Cualquiera</option><option value="forbidden">Prohibidas</option><option value="limited">Limitadas</option>
+          <option value="semi">Semilimitadas</option><option value="unlimited">Sin límite</option>
+        </select></label>
+        <button id="btn-reset" type="button" class="link-btn">Quitar filtros</button>
+      </div>
+      <div class="results-head">
+        <span id="result-count"></span>
+        <span id="online-status" class="online-status" hidden>Buscando en YGOPRODeck…</span>
+        <label><span class="sr">Ordenar por</span><select id="f-sort">
+          <option value="">Relevancia</option><option value="name">Nombre</option><option value="atk">ATK</option>
+          <option value="def">DEF</option><option value="level">Nivel</option>
+        </select></label>
+      </div>
+      <div id="results-scroll" class="results-scroll">
+        <ul id="results" class="results"></ul>
+        <button id="more" type="button" class="more">Mostrar más</button>
+      </div>
+    </aside>
+    <div class="scrim" aria-hidden="true"></div>
+  </main>
+
+
+  <main class="handtest mode-pane" data-mode="mano" hidden>
+    <section class="ht-main">
+      <div class="toolrow">
+        <label class="sr" for="ht-deck">Mazo</label>
+        <select id="ht-deck" class="deck-select"></select>
+        <div id="ht-size" class="seg" role="group" aria-label="Tamaño de la mano">
+          <button type="button" data-n="5">Primero · 5</button><button type="button" data-n="6">Segundo · 6</button>
+        </div>
+        <button id="ht-draw" type="button" class="primary">Robar mano</button>
+        <button id="ht-draw1" type="button">Robar 1</button>
+        <button id="ht-clear" type="button">Vaciar mano</button>
+        <button id="ht-tofield" type="button" class="go">Jugar esta mano en el campo →</button>
+      </div>
+      <div class="ht-hand-wrap">
+        <header><h3>Mano</h3><span class="count"><span id="ht-hand-count">0</span> cartas · quedan <span id="ht-rest">0</span> en el mazo</span></header>
+        <div id="ht-hand" class="ht-hand"></div>
+      </div>
+      <div id="ht-stats" class="ht-stats"></div>
+    </section>
+    <aside class="panel ht-list">
+      <header class="ht-list-head">
+        <h3>Mazo principal · <span id="ht-deck-n">0</span></h3>
+        <p class="hint">Usa <b>+</b> y <b>−</b> para elegir exactamente qué cartas tienes en mano. Marca con ★ tus starters.</p>
+      </header>
+      <div class="ht-table-wrap">
+        <table class="ht-table">
+          <thead><tr><th>Carta</th><th class="num">Copias</th><th class="num">Abrirla</th><th class="num">Próx. robo</th><th>En mano</th><th><span class="sr">Starter</span>★</th></tr></thead>
+          <tbody id="ht-rows"></tbody>
+        </table>
+      </div>
+    </aside>
+  </main>
+
+  <main class="fieldmode mode-pane" data-mode="campo" hidden>
+    <section class="fd-main">
+      <div class="toolrow">
+        <label class="sr" for="fd-deck">Mazo</label>
+        <select id="fd-deck" class="deck-select"></select>
+        <div id="fd-size" class="seg" role="group" aria-label="Cartas iniciales">
+          <button type="button" data-n="5">5</button><button type="button" data-n="6">6</button>
+        </div>
+        <button id="fd-new" type="button" class="primary">Nuevo duelo</button>
+        <button id="fd-draw" type="button" title="Atajo: D">Robar</button>
+        <button id="fd-shuffle" type="button">Barajar</button>
+        <button id="fd-search" type="button">Buscar en el mazo</button>
+        <button id="fd-undo" type="button" title="Atajo: Ctrl+Z">Deshacer</button>
+        <label class="lp"><span>LP</span><input id="fd-lp" type="number" step="100" inputmode="numeric"></label>
+      </div>
+      <div id="fd-pending" class="pending" hidden><span id="fd-pending-text"></span><button id="fd-cancel" type="button">Cancelar</button></div>
+      <div class="board-wrap"><div id="board" class="board"></div></div>
+      <div id="fd-hand-wrap" class="fd-hand-wrap">
+        <header><h3>Mano</h3><span class="count" id="fd-hand-count">0</span></header>
+        <div id="fd-hand" class="fd-hand"></div>
+      </div>
+    </section>
+    <aside id="fd-side" class="panel fd-side">
+      <button id="fd-deselect" class="icon-btn fd-close" type="button" aria-label="Cerrar">×</button>
+      <div id="fd-actions" class="fd-actions"></div>
+      <div id="fd-detail" class="fd-detail"></div>
+    </aside>
+  </main>
+
+  <nav class="mtabs" aria-label="Secciones">
+    <button class="mtab" type="button" data-pane="deck" aria-selected="true">Mazo <span id="tab-deck-count" class="badge">0</span></button>
+    <button class="mtab" type="button" data-pane="search" aria-selected="false">Buscar cartas</button>
+  </nav>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h2 id="modal-title"></h2>
+    <div id="modal-body" class="modal-body"></div>
+    <div id="modal-foot" class="modal-foot"></div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="data/cards.js"></script>
+<script src="data/banlist.js"></script>
+<script src="js/sample-deck.js"></script>
+<script src="js/carddb.js"></script>
+<script src="js/deck.js"></script>
+<script src="js/cardview.js"></script>
+<script src="js/online.js"></script>
+<script src="js/game.js"></script>
+<script src="js/deckbuilder.js"></script>
+<script src="js/handtest.js"></script>
+<script src="js/field.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
