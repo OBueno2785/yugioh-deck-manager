@@ -139,6 +139,56 @@
       return out;
     },
 
+    /** Lee una lista de texto tipo "3x Ash Blossom & Joyous Spring" con secciones Main/Extra/Side.
+     *  Devuelve null si el texto no tiene ese formato. */
+    parseList(text) {
+      const entries = [];
+      let section = 'main';
+      for (let line of text.split(/\r?\n/)) {
+        line = line.trim();
+        if (/^main( deck)?:?$/i.test(line)) section = 'main';
+        else if (/^extra( deck)?:?$/i.test(line)) section = 'extra';
+        else if (/^side( deck)?:?$/i.test(line)) section = 'side';
+        else {
+          const m = line.match(/^(\d+)\s*x\s+(.+)$/i);
+          if (m) entries.push({ section, count: Number(m[1]), name: m[2].replace(/&amp;/g, '&').trim() });
+        }
+      }
+      return entries.length ? entries : null;
+    },
+
+    /** Coloca en el mazo las entradas de lista cuyas cartas ya conoce la base; devuelve las que faltan. */
+    placeEntries(d, entries) {
+      const missing = [];
+      for (const e of entries) {
+        const c = db.findByName(e.name);
+        if (!c) { missing.push(e); continue; }
+        const section = e.section === 'side' ? 'side' : db.isExtra(c) ? 'extra' : 'main';
+        for (let i = 0; i < e.count; i++) d[section].push(c.id);
+      }
+      return missing;
+    },
+
+    /** Lee un mazo en .ydk o en lista de texto. Devuelve { main, extra, side, unknown, unknownIds, missing }. */
+    fromText(text) {
+      const entries = deck.parseList(text);
+      if (!entries) return Object.assign(deck.fromYdk(text), { missing: [] });
+      const out = { main: [], extra: [], side: [], unknown: 0, unknownIds: [] };
+      out.missing = deck.placeEntries(out, entries);
+      out.unknown = out.missing.reduce((n, e) => n + e.count, 0);
+      return out;
+    },
+
+    /** Intenta colocar las cartas pendientes (las que faltaban al importar). Devuelve cuántas colocó. */
+    resolvePending(d) {
+      if (!d.pending || !d.pending.length) return 0;
+      const before = d.pending.reduce((n, e) => n + e.count, 0);
+      d.pending = deck.placeEntries(d, d.pending);
+      const after = d.pending.reduce((n, e) => n + e.count, 0);
+      if (after !== before) d.updated = Date.now();
+      return before - after;
+    },
+
     /** Mazo como lista de cartas expandida (útil para la prueba de mano y el campo). */
     cards(d, section) {
       return d[section || 'main'].map((id) => db.get(id)).filter(Boolean);
@@ -158,10 +208,25 @@
   const store = {
     /** Lista de mazos guardados; si no hay ninguno devuelve el mazo de ejemplo. */
     load() {
-      const list = read(KEY, null);
-      if (Array.isArray(list) && list.length) return list;
-      const s = window.YGO_SAMPLE_DECK;
-      return [s ? deck.create(s.name, { main: s.main.slice(), extra: s.extra.slice(), side: s.side.slice() }) : deck.create()];
+      let list = read(KEY, null);
+      if (!Array.isArray(list) || !list.length) {
+        const s = window.YGO_SAMPLE_DECK;
+        list = [s ? deck.create(s.name, { main: s.main.slice(), extra: s.extra.slice(), side: s.side.slice() }) : deck.create()];
+      }
+      // Mazos compartidos en el proyecto: se agregan una sola vez a la lista guardada
+      const prefs = read(PREF, {});
+      const added = prefs.presetsAdded || [];
+      for (const p of window.YGO_PRESET_DECKS || []) {
+        if (added.includes(p.presetId) || list.some((d) => d.presetId === p.presetId)) continue;
+        const d = deck.create(p.name, { presetId: p.presetId });
+        d.pending = deck.placeEntries(d, deck.parseList(p.list));
+        list.push(d);
+        added.push(p.presetId);
+        prefs.lastDeckId = d.id;
+      }
+      prefs.presetsAdded = added;
+      write(PREF, prefs);
+      return list;
     },
     save(list) { return write(KEY, list); },
     prefs() { return read(PREF, {}); },

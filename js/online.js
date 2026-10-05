@@ -93,6 +93,27 @@
       return added;
     },
 
+    /** Busca cartas por nombre exacto (como vienen en una lista de mazo). Devuelve cuántas añadió. */
+    async fetchNames(names) {
+      const wanted = Array.from(new Set(names)).filter((n) => !db.findByName(n));
+      if (!wanted.length) return 0;
+      let added = 0;
+      try { added += db.add((await get({ name: wanted.join('|') })).map(toRow)); } catch (e) { /* se intenta una por una */ }
+      for (const n of wanted) {
+        if (db.findByName(n)) continue;
+        try {
+          const data = await get({ fname: n.replace(/["“”]/g, '') });
+          const key = db.nameKey(n);
+          const hit = data.find((c) => db.nameKey(c.name) === key) || (data.length === 1 ? data[0] : null);
+          if (hit) {
+            added += db.add([toRow(hit)]);
+            if (!db.findByName(n)) db.addNameAlias(n, hit.id);
+          }
+        } catch (e) { /* sin conexión */ }
+      }
+      return added;
+    },
+
     /** Busca por nombre en YGOPRODeck y añade lo que falte. Devuelve cuántas cartas nuevas añadió. */
     async searchName(text) {
       const data = await get({ fname: text });

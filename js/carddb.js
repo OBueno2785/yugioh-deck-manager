@@ -60,6 +60,9 @@
   const LINK_ARROWS = [[0x40, '↖'], [0x80, '↑'], [0x100, '↗'], [0x8, '←'], [0x20, '→'], [0x1, '↙'], [0x2, '↓'], [0x4, '↘']];
 
   const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  // Clave para comparar nombres de cartas escritos a mano o exportados por otros simuladores
+  const nameKey = (s) => norm(String(s).replace(/&amp;/g, '&').replace(/[\u201c\u201d\u2033]/g, '"').replace(/[\u2018\u2019]/g, "'"))
+    .replace(/\s+/g, ' ').trim();
 
   const raw = window.YGO_DATA || { fields: [], cards: [], aliases: {} };
   // Fila compacta: [id, nombre, tipo, atk, def, nivel, raza, atributo, ot, setcode, texto]
@@ -96,6 +99,10 @@
   try { extraAliases = JSON.parse(localStorage.getItem(ALIAS_KEY) || '{}'); } catch (e) { extraAliases = {}; }
   Object.assign(aliases, extraAliases);
   const banlist = window.YGO_BANLIST || { name: '', limits: {} };
+  let nameIndex = null;
+  const NAME_ALIAS_KEY = 'simulador-yugioh:name-aliases';
+  let nameAliases = {};
+  try { nameAliases = JSON.parse(localStorage.getItem(NAME_ALIAS_KEY) || '{}'); } catch (e) { nameAliases = {}; }
 
   const db = {
     T, RACES, ATTRIBUTES, SUBTYPES, LINK_ARROWS, cards, banlistName: banlist.name, norm,
@@ -113,12 +120,26 @@
         n++;
       }
       if (n) {
+        nameIndex = null;
         cards.sort((a, b) => a.name.localeCompare(b.name));
         try { localStorage.setItem(EXTRA_KEY, JSON.stringify(extraRows)); } catch (e) { /* sin almacenamiento */ }
       }
       return n;
     },
     has: (id) => byId.has(Number(id)) || byId.has(Number(aliases[id])),
+
+    /** Busca una carta por su nombre exacto (sin distinguir mayúsculas, tildes ni comillas tipográficas). */
+    findByName(name) {
+      if (!nameIndex) nameIndex = new Map(cards.map((c) => [nameKey(c.name), c]));
+      const k = nameKey(name);
+      return nameIndex.get(k) || byId.get(nameAliases[k]) || null;
+    },
+    /** Recuerda que un nombre escrito de otra forma corresponde a esta carta. */
+    addNameAlias(name, id) {
+      nameAliases[nameKey(name)] = Number(id);
+      try { localStorage.setItem(NAME_ALIAS_KEY, JSON.stringify(nameAliases)); } catch (e) { /* sin almacenamiento */ }
+    },
+    nameKey,
 
     /** Registra una ilustración alternativa (otro código) de una carta ya conocida. */
     addAlias(altId, baseId) {

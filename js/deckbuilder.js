@@ -66,6 +66,13 @@
     v.textContent = probs.length ? probs[0] + (probs.length > 1 ? ' (+' + (probs.length - 1) + ' más)' : '') : 'Mazo válido para duelo';
     v.title = probs.join('\n');
     $('#tab-deck-count').textContent = s.main;
+    const pend = current.pending || [];
+    const pn = pend.reduce((n, e) => n + e.count, 0);
+    $('#pending-note').hidden = !pn;
+    if (pn) {
+      $('#pending-note').innerHTML = '<b>Faltan ' + pn + ' cartas por cargar:</b> ' + pend.map((e) => e.count + '× ' + esc(e.name)).join(', ')
+        + (window.YGO.online.available() ? '. Buscándolas en YGOPRODeck…' : '. Son cartas nuevas que no trae la base incluida; se cargan solas al abrir el simulador como sitio web.');
+    }
   }
 
   function commit() {
@@ -254,14 +261,15 @@
   }
 
   function openImport() {
-    modal('Importar mazo .ydk', '<label class="field"><span>Archivo .ydk</span><input id="m-file" type="file" accept=".ydk,.txt,text/plain"></label>'
-      + '<label class="field"><span>O pega el contenido</span><textarea id="m-text" rows="9" spellcheck="false" placeholder="#main&#10;14558127&#10;..."></textarea></label>'
+    modal('Importar mazo', '<p class="hint">Acepta archivos .ydk y listas de texto como las que exporta Dueling Nexus (<i>3x Ash Blossom &amp; Joyous Spring</i>).</p>'
+      + '<label class="field"><span>Archivo .ydk o .txt</span><input id="m-file" type="file" accept=".ydk,.txt,text/plain"></label>'
+      + '<label class="field"><span>O pega el contenido</span><textarea id="m-text" rows="9" spellcheck="false" placeholder="Main Deck:&#10;3x Ash Blossom &amp; Joyous Spring&#10;..."></textarea></label>'
       + '<label class="field"><span>Nombre</span><input id="m-name" type="text" maxlength="60" value="Mazo importado"></label>', [
       { label: 'Cancelar' },
       { label: 'Importar como mazo nuevo', kind: 'primary', action: () => {
         const text = $('#m-text').value;
         const name = $('#m-name').value.trim() || 'Mazo importado';
-        const first = deck.fromYdk(text);
+        const first = deck.fromText(text);
         if (!(first.main.length + first.extra.length + first.side.length + first.unknown)) {
           toast('No encontré códigos de cartas en el texto', 'warn');
           return false;
@@ -271,7 +279,7 @@
           const btn = $('#modal-foot .primary');
           btn.disabled = true;
           btn.textContent = 'Buscando ' + first.unknown + ' cartas nuevas…';
-          window.YGO.online.fetchIds(first.unknownIds)
+          (first.missing.length ? window.YGO.online.fetchNames(first.missing.map((e) => e.name)) : window.YGO.online.fetchIds(first.unknownIds))
             .catch(() => 0)
             .then(() => { closeModal(); finishImport(text, name); refreshDbCount(); });
           return false;
@@ -292,16 +300,35 @@
   }
 
   function finishImport(text, name) {
-    const parsed = deck.fromYdk(text);
+    const parsed = deck.fromText(text);
     const total = parsed.main.length + parsed.extra.length + parsed.side.length;
-    const d = deck.create(name, { main: parsed.main, extra: parsed.extra, side: parsed.side });
+    const d = deck.create(name, { main: parsed.main, extra: parsed.extra, side: parsed.side, pending: parsed.missing });
     decks.push(d);
     switchDeck(d);
-    toast('Importadas ' + total + ' cartas' + (parsed.unknown ? '; ' + parsed.unknown + ' códigos desconocidos se omitieron' : ''), parsed.unknown ? 'warn' : 'ok');
+    const lost = parsed.missing.length ? '; ' + parsed.unknown + ' quedan pendientes (se buscan en YGOPRODeck desde el sitio web)'
+      : parsed.unknown ? '; ' + parsed.unknown + ' códigos desconocidos se omitieron' : '';
+    toast('Importadas ' + total + ' cartas' + lost, parsed.unknown ? 'warn' : 'ok');
   }
 
   function refreshDbCount() {
     $('#db-count').textContent = db.cards.length.toLocaleString('es');
+  }
+
+  /** Busca en YGOPRODeck las cartas pendientes de todos los mazos y las coloca. */
+  function resolvePendingAll() {
+    if (!window.YGO.online.available()) return;
+    const names = [];
+    decks.forEach((d) => (d.pending || []).forEach((e) => names.push(e.name)));
+    if (!names.length) return;
+    window.YGO.online.fetchNames(names).catch(() => 0).then(() => {
+      let placed = 0;
+      decks.forEach((d) => { placed += deck.resolvePending(d); });
+      if (placed) {
+        refreshDbCount();
+        commit();
+        toast('Se cargaron ' + placed + ' cartas nuevas desde YGOPRODeck', 'ok');
+      }
+    });
   }
 
   /* ---------- Búsqueda en línea ---------- */
@@ -520,6 +547,7 @@
     window.YGO.online.onChange(() => {
       $('#online-badge').hidden = !window.YGO.online.available();
       searchOnline();
+      resolvePendingAll();
     });
     window.YGO.online.probe();
     view.images.probe();
