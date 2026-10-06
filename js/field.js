@@ -1,7 +1,9 @@
 /* Campo de juego para practicar combos: zonas de Master Rule, mano, mazo, Extra, cementerio y destierro.
  * Las cartas se mueven arrastrando o tocando la carta y luego la zona destino.
  * Las invocaciones y los efectos se declaran antes de hacerlos: YGO.rules (js/rules.js) dice si la jugada
- * es legal, la cadena se arma y se resuelve aquí, y todo queda anotado en el registro del duelo. */
+ * es legal, la cadena se arma y se resuelve aquí, y todo queda anotado en el registro del duelo.
+ * Rival con handtraps (js/bot.js): responde solo a tus jugadas, sus efectos se aplican al resolver la cadena,
+ * y cada intento queda guardado (js/attempts.js) para saber cuántas veces pasa tu campo. */
 (function () {
   const { db, game, view, store } = window.YGO;
   const $ = (sel, root) => (root || document).querySelector(sel);
@@ -37,7 +39,13 @@
   const PHASES = [['draw', 'Robo'], ['standby', 'Standby'], ['main1', 'Principal 1'], ['battle', 'Batalla'], ['main2', 'Principal 2'], ['end', 'Final']];
   const PHASE_SHORT = { main1: 'P1', main2: 'P2' };
 
-  const prefs = Object.assign({ handSize: 5, fieldStrict: true }, store.prefs());
+  // fieldSecond: ir segundo; botCount: 0 (sin rival) | 2 | 3 | '2-3'; botMode: 'smart' | 'aggressive'; botPool: [{ name, copies }]
+  const prefs = Object.assign({ handSize: 5, fieldStrict: true, fieldSecond: false, botCount: 0, botMode: 'smart', botPool: null }, store.prefs());
+  const savePref = (patch) => { Object.assign(prefs, patch); store.savePrefs(Object.assign(store.prefs(), patch)); };
+  // Antes el campo repartía prefs.handSize: quien tenía 6 practicaba ir segundo (se guarda una vez como fieldSecond)
+  if (store.prefs().fieldSecond === undefined && Number(prefs.handSize) === 6) savePref({ fieldSecond: true });
+  /** Relee las preferencias guardadas (otra pestaña pudo cambiarlas). */
+  const freshPrefs = () => Object.assign(prefs, store.prefs());
   let d = null;
   let S = null;           // estado de la partida (incluye turnState, chain y log: así deshacer los incluye)
   let history = [];
@@ -49,13 +57,17 @@
   let escModal = false;   // la tecla Escape cerró una ventana (no debe cancelar nada más)
   let chainFolded = false; // franja de la cadena plegada (móvil)
   let logSeen = 0;        // entradas del registro ya mostradas (para bajar al final cuando hay nuevas)
+  let oppQueued = null;   // respuesta del rival que se muestra al volver a la pestaña del campo
+  let revealed = {};      // "Ver mano" del rival, por duelo (S.duelId)
+  let recorded = null;    // { duelId, id }: intento ya guardado de este duelo (si se termina otra vez, se actualiza)
 
   const decks = () => window.YGO.builder.decks();
   const blank = () => {
     const zones = {};
     FIELD_ZONES.forEach((z) => { zones[z] = []; });
-    return { deck: [], hand: [], extra: [], gy: [], ban: [], zones, lp: 8000, turnDraws: 0, turnState: newTurnState(), chain: [], log: [] };
+    return { deck: [], hand: [], extra: [], gy: [], ban: [], zones, lp: 8000, turnDraws: 0, turnState: newTurnState(), chain: [], log: [], opp: null };
   };
+  const arr = (x) => (Array.isArray(x) ? x : []);
 
   /* ---------- Reglas (js/rules.js) ----------
    * Todas las consultas pasan por aquí: si el módulo falta o falla, el campo sigue funcionando sin revisar nada. */
@@ -106,14 +118,36 @@
   }
 
   const checkSummon = (req) => verdict(ask('checkSummon', [S, req], PASS));
-  const checkActivation = (req) => verdict(ask('checkActivation', [S, req], PASS));
+  // Un monstruo con sus efectos negados (Effect Veiler, Infinite Impermanence) no los activa ese turno: si las reglas
+  // ya lo dicen, merge no repite el mensaje
+  const checkActivation = (req) => merge(verdict(ask('checkActivation', [S, req], PASS)), negatedVerdict(req.uid));
   const checkPosition = (uid, to) => verdict(ask('checkPosition', [S, uid, { to }], PASS));
   const checkPlacement = (st, uid, zone, opts) => verdict(ask('checkPlacement', [st, uid, zone, opts || {}], () => localPlacement(st, uid, zone)));
+  /** Movimiento manual (p. ej. del Mazo a la mano con Droll & Lock Bird activo). */
+  const checkMove = (uid, dest, opts) => verdict(ask('checkMove', [S, uid, dest, opts || {}], () => localCheckMove(uid, dest)));
+
+  /** Sin YGO.rules.checkMove: solo el bloqueo de Droll & Lock Bird ("no se añaden cartas del Mazo a la mano"). */
+  function localCheckMove(uid, dest) {
+    const loc = locate(uid);
+    const lock = arr(S.turnState.locks).find((l) => l && l.kind === 'noDeckAdd');
+    if (loc && loc.area === 'deck' && dest === 'hand' && lock) {
+      return fail('Por ' + q(lock.source || 'Droll & Lock Bird') + ', este turno no se pueden añadir cartas del Mazo a la mano.');
+    }
+    return PASS();
+  }
+  /** Efectos negados este turno por el rival (inst.negated = { turn, by }). */
+  const isNegated = (inst) => !!(inst && inst.negated && inst.negated.turn === S.turnState.turn);
+  const byText = (by) => (!by ? '' : String(by).includes('«') ? String(by) : q(by));
+  function negatedVerdict(uid) {
+    const f = uid && find(uid);
+    if (!f || f.loc.area !== 'field' || !isNegated(f.inst)) return null;
+    return fail('Los efectos de ' + q(f.c.name) + ' están negados este turno (por ' + byText(f.inst.negated.by) + ').');
+  }
 
   /** Revisión mínima de zonas para cuando no hay módulo de reglas. */
   function localPlacement(st, uid, zone) {
     const loc = locate(uid, st);
-    const c = loc && db.get(loc.list[loc.index].id);
+    const c = loc && cardOf(loc.list[loc.index]);
     if (!c || !st.zones[zone]) return PASS();
     const errors = [];
     if (st.zones[zone].length) errors.push('Esa zona ya está ocupada.');
@@ -152,8 +186,13 @@
   const phaseName = (k) => (phases().find((p) => p[0] === k) || [k, k])[1];
   const strict = () => prefs.fieldStrict !== false;
 
-  function newTurnState() {
-    return ask('newTurnState', [], () => ({ turn: 1, mine: true, phase: 'main1', normalSummons: 0, opt: {} }));
+  /** opts.second: vas segundo (turno 2, tu turno, con Fase de Batalla). */
+  function newTurnState(opts) {
+    const second = !!(opts && opts.second);
+    const t = ask('newTurnState', second ? [{ second: true }] : [], () => ({ turn: 1, mine: true, phase: 'main1', normalSummons: 0, opt: {} }));
+    // Si las reglas no conocen { second }, el turno 2 se pone aquí
+    if (second && t && t.turn === 1) { t.turn = 2; t.mine = true; }
+    return t;
   }
   /** Completa estados viejos (fotos de deshacer o partidas de antes) que no traen turno, cadena ni registro. */
   function ensureState() {
@@ -197,7 +236,7 @@
     S.log.push(e);
     return e;
   }
-  const logManual = (text) => pushLog({ kind: 'manual', text: 'Movimiento manual: ' + text });
+  const logManual = (text, v) => pushLog({ kind: 'manual', text: 'Movimiento manual: ' + text }, v || null);
 
   /** Avisa a las reglas (contadores del turno) y deja la jugada en el registro una sola vez.
    * args: lo que recibe la función de las reglas después de S (p. ej. [req, v]). */
@@ -230,29 +269,68 @@
     render();
   }
 
+  /** ¿Hay jugadas anotadas después de repartir? (el robo de quien va segundo no cuenta) */
+  const hasPlays = () => !!(S && Array.isArray(S.log) && S.log.length > (Number(S.setupLog) || 0));
   /** Antes de borrar una partida con jugadas anotadas, pregunta. */
   function confirmRestart(go) {
-    if (!S || !S.log || !S.log.length) { go(); return; }
+    if (!hasPlays()) { go(); return; }
     openDialog('¿Empezar un duelo nuevo?', '<p class="hint">Se borra la partida actual: el campo, la cadena y el registro de jugadas.</p>',
       [{ label: 'Cancelar' }, { label: 'Nuevo duelo', kind: 'primary', action: go }]);
   }
 
-  function newDuel(handIds, restIds) {
+  /** Duelo nuevo. handIds/restIds: mano y mazo exactos (si no, se reparte al azar).
+   * opts: { second, bot: { enabled, count, mode, pool, seed, forceHand } }; sin opts.bot se usan las preferencias. */
+  function newDuel(handIds, restIds, opts) {
+    opts = opts || {};
+    const second = opts.second !== undefined ? !!opts.second : !!freshPrefs().fieldSecond;
+    // Una ventana del campo que quedó abierta (p. ej. "El rival responde" del duelo anterior) ya no vale
+    if (dialogOpen || pileOpen) closeModal();
     S = blank();
     history = [];
     histBase = 0;
     selected = null;
     pending = null;
     logSeen = 0;
+    oppQueued = null;
+    S.duelId = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    S.turnState = newTurnState({ second });
     if (handIds) {
       S.hand = handIds.map(game.instance);
       S.deck = game.shuffle(restIds.map(game.instance));
     } else {
       S.deck = game.shuffle(d.main.map(game.instance));
-      S.hand = S.deck.splice(0, prefs.handSize);
+      S.hand = S.deck.splice(0, 5);
     }
     S.extra = d.extra.map(game.instance);
+    if (second) secondDraw(!!handIds && handIds.length >= 6);
+    const cfg = botConfig(opts.bot);
+    S.opp = makeOpponent(cfg);
+    // Para "Misma mano, otras handtraps" y para cambiar entre Primero y Segundo con la misma mano
+    S.start = {
+      deckId: d.id, hand: S.hand.map((x) => x.id), second,
+      bot: { enabled: !!S.opp, count: cfg.count, mode: cfg.mode, pool: cfg.pool || null },
+    };
     render();
+    botEvent({ type: 'start' });
+    // Lo que se anotó al repartir (el robo de quien va segundo, la respuesta del rival al empezar) no cuenta como jugada tuya
+    S.setupLog = S.log.length;
+  }
+
+  /** Vas segundo: en la Fase de Robo robas 1 (si la mano ya trae 6 cartas, la 6ª cuenta como la robada). */
+  function secondDraw(given) {
+    const t = S.turnState;
+    t.phase = 'draw';
+    let card = null;
+    if (given) card = S.hand[S.hand.length - 1];
+    else if (S.deck.length) { card = S.deck.shift(); S.hand.push(card); }
+    pushLog({ kind: 'draw', text: 'Vas segundo · Fase de Robo: robas ' + (card ? q(nameById(card.id)) : 'nada (el mazo está vacío)') });
+    t.phase = 'main1';
+  }
+  /** Mazo principal sin las cartas de la mano (con sus copias). */
+  function restOf(handIds) {
+    const pool = d.main.slice();
+    handIds.forEach((id) => { const i = pool.indexOf(id); if (i >= 0) pool.splice(i, 1); });
+    return pool;
   }
 
   /** Busca una carta por uid (en S o en otro estado). Devuelve { area, zone, index, list } */
@@ -273,13 +351,56 @@
     const loc = uid && locate(uid);
     if (!loc) return null;
     const inst = loc.list[loc.index];
-    return { loc, inst, c: db.get(inst.id) };
+    return { loc, inst, c: cardOf(inst) };
   }
   const q = (name) => '«' + name + '»';
   /** Lista en español: "A", "A y B", "A, B y C". */
   const listEs = (xs) => (xs.length > 1 ? xs.slice(0, -1).join(', ') + ' y ' + xs[xs.length - 1] : xs.join(''));
+  /** "1 carta", "3 cartas". */
+  const nOf = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
   const nameById = (id) => { const c = db.get(id); return c ? c.name : 'Carta ' + id; };
-  const nameOf = (uid) => { const f = find(uid); return f ? nameById(f.inst.id) : '?'; };
+  const nameOf = (uid) => { const f = find(uid); return f ? (f.c ? f.c.name : nameById(f.inst.id)) : '?'; };
+
+  /* ---------- Fichas (Primal Being Token de Nibiru) ----------
+   * inst.token = { name, atk, def, level, attribute, race }. No están en la base de cartas (o bot.js las registra
+   * con un código virtual): se arma una carta con sus datos. Desaparecen al dejar el campo. */
+  const ATTR_BITS = { EARTH: 0x1, WATER: 0x2, FIRE: 0x4, WIND: 0x8, LIGHT: 0x10, DARK: 0x20, DIVINE: 0x40 };
+  const RACE_BITS = { WARRIOR: 0x1, SPELLCASTER: 0x2, FAIRY: 0x4, FIEND: 0x8, ZOMBIE: 0x10, MACHINE: 0x20, AQUA: 0x40, PYRO: 0x80, ROCK: 0x100, DRAGON: 0x2000, BEAST: 0x4000 };
+  const statNum = (n) => (typeof n === 'number' && n >= 0 ? n : Number(n) >= 0 ? Number(n) : 0);
+  function tokenCard(inst) {
+    const t = inst.token || {};
+    const base = db.get(inst.id) || {};
+    const bits = (v, map, dflt) => (typeof v === 'number' ? v : map[String(v || '').toUpperCase()] || dflt);
+    const lv = Number(t.level) || base.lv || 1;
+    return Object.assign({}, base, {
+      id: inst.id, name: t.name || base.name || 'Ficha', type: T.MONSTER | T.NORMAL | T.TOKEN, atk: statNum(t.atk), def: statNum(t.def),
+      level: lv, lv, race: bits(t.race, RACE_BITS, base.race || 0x100), attribute: bits(t.attribute, ATTR_BITS, base.attribute || 0x10),
+      isLink: false, scaleL: 0, scaleR: 0, desc: base.desc || 'Ficha creada por un efecto. Desaparece cuando deja el campo.', isToken: true,
+    });
+  }
+  /** Carta de una instancia (las fichas, con sus propios datos). */
+  const cardOf = (inst) => (!inst ? null : inst.token ? tokenCard(inst) : db.get(inst.id));
+  function tokenTile(c, attrs) {
+    return '<div class="card f-token" data-id="' + esc(c.id) + '" title="' + esc(c.name) + '" ' + (attrs || '') + '><div class="face"><span class="nm">'
+      + esc(c.name) + '</span><span class="lv">★' + c.lv + '</span><span class="st">' + c.atk + '/' + c.def + '</span></div></div>';
+  }
+  function tokenDetail(c) {
+    return '<div class="detail-art">' + tokenTile(c) + '</div><h2 class="detail-name">' + esc(c.name) + '</h2><div class="ctext">'
+      + '<p class="ct-line">Ficha · ' + esc(db.raceName(c) || '') + ' · ' + esc(db.attributeName(c) || '') + ' · Nivel ' + c.lv + '</p>'
+      + '<p class="ct-line">ATK ' + c.atk + ' / DEF ' + c.def + '</p><div class="ct-body"><p>' + esc(c.desc) + '</p></div></div>';
+  }
+  /** Las fichas fuera del campo (o como material) desaparecen. Devuelve cuántas se quitaron. */
+  function sweepTokens() {
+    let n = 0;
+    ['hand', ...PILES].forEach((a) => { const before = S[a].length; S[a] = S[a].filter((x) => !x.token); n += before - S[a].length; });
+    FIELD_ZONES.forEach((z) => {
+      const st = S.zones[z];
+      const keep = st.filter((x, i) => i === 0 || !x.token);
+      n += st.length - keep.length;
+      S.zones[z] = keep;
+    });
+    return n;
+  }
   const fromKey = (loc) => (loc.area === 'field' ? loc.zone : loc.area);
 
   /** Saca la carta de donde esté. Si era un monstruo con materiales, estos van al cementerio. */
@@ -301,6 +422,7 @@
     // Si ya se invocó bien antes (p. ej. Sincronía y luego revivido), conserva esa primera forma
     if (c.summonMethod && (!c.properSummon || c.properSummon === 'special')) c.properSummon = c.summonMethod;
     delete c.summonedTurn; delete c.summonMethod; delete c.setTurn; delete c.positionChangedTurn; delete c.extraFaceUp; delete c.level;
+    delete c.negated; // la negación de Veiler o Impermanence es solo mientras está en el campo
     return c;
   };
   /** Vuelve a la mano, al mazo o boca abajo al Extra Deck: ya no cuenta cómo se invocó antes. */
@@ -323,7 +445,31 @@
     opts = opts || {};
     const loc = locate(uid);
     if (!loc) return false;
-    const c = db.get(loc.list[loc.index].id);
+    // Del Mazo a la mano (buscar una carta): las reglas revisan bloqueos como el de Droll & Lock Bird
+    if (loc.area === 'deck' && dest === 'hand') {
+      const v = checkMove(uid, dest, opts);
+      gate(v, () => {
+        if (moveNow(uid, dest, opts, v)) botEvent({ type: 'add', uids: [uid], from: 'deck' });
+      });
+      return false;
+    }
+    return moveNow(uid, dest, opts, null);
+  }
+  /** v: veredicto de checkMove (si la jugada fue ilegal, queda marcada en el registro). */
+  function moveNow(uid, dest, opts, v) {
+    const loc = locate(uid);
+    if (!loc) return false;
+    const c = cardOf(loc.list[loc.index]);
+    // Una ficha que deja el campo desaparece
+    if (loc.list[loc.index].token && !FIELD_ZONES.includes(dest)) {
+      snapshot();
+      if (loc.area === 'field' && loc.index === 0) takeStack(uid).slice(1).forEach((m) => S.gy.push(resetCard(m)));
+      else loc.list.splice(loc.index, 1);
+      logManual(q(c.name) + ' deja el campo y desaparece');
+      selected = null;
+      render();
+      return true;
+    }
     if (FIELD_ZONES.includes(dest)) {
       const target = S.zones[dest];
       if (target.length && !opts.overlay && !opts.attach) { toast('Esa zona ya está ocupada'); return false; }
@@ -396,7 +542,7 @@
       where = 'Extra Deck';
       toast('Los monstruos del Extra Deck regresan al Extra Deck');
     }
-    logManual(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + where);
+    logManual(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + where, v);
     if (pileOpen && !S[pileOpen].length) closePile();
     selected = null;
     render();
@@ -576,6 +722,7 @@
   function sendMaterial(uid, dest) {
     const r = detach(uid);
     if (!r) return;
+    if (r.card.token) return 'gone'; // una ficha (p. ej. material de un Link) desaparece
     const card = resetCard(r.card);
     const c = db.get(card.id);
     if (dest === 'gy' && pendulumToExtra(r.from, c)) {
@@ -626,7 +773,10 @@
   }
 
   function performSummon(req, v) {
-    if (!find(req.uid)) return;
+    const f0 = find(req.uid);
+    if (!f0) return;
+    const from = {};
+    from[req.uid] = fromKey(f0.loc);
     pending = null;
     selected = null;
     snapshot();
@@ -648,6 +798,7 @@
     const r = detach(req.uid);
     if (r) placeSummoned(r.card, req.zone, req.method, req.position, under);
     afterPlay(v);
+    botEvent({ type: 'summon', uids: [req.uid], method: req.method, from });
   }
 
   /** Entra en el modo de elegir materiales (o sacrificios, o las cartas de una Invocación por Péndulo). */
@@ -665,13 +816,21 @@
       matDest: 'gy',
       need: opts.need || 0,
       pm: PROCEDURES.includes(method) ? materialsInfo(f.c) : null,
-      // Qué efecto permite la invocación: con una cadena abierta, el último eslabón (p. ej. Elfnote Power Patron)
-      src: method !== 'special' && !isNormalMethod(method) && S.chain.length ? 'chain:' + (S.chain.length - 1) : '',
+      // Qué efecto permite la invocación: con una cadena abierta, tu último eslabón (p. ej. Elfnote Power Patron; nunca el del rival)
+      src: method !== 'special' && !isNormalMethod(method) && ownTopCL() >= 0 ? 'chain:' + ownTopCL() : '',
       proc: method === 'special' ? procedureOf(f.c) : null, // Invocación Especial por su procedimiento (con costos)
     };
     selected = null;
     render();
   }
+  /** Índice de tu eslabón más alto en la cadena (los del rival no Invocan por ti) o -1. */
+  function ownTopCL() {
+    for (let i = S.chain.length - 1; i >= 0; i--) if (S.chain[i] && S.chain[i].owner !== 'opp') return i;
+    return -1;
+  }
+  /** Opciones "CLn · carta" de tus eslabones (sin los del rival). */
+  const ownLinkOpts = (opt, sel) => S.chain.map((l, i) => (l.owner === 'opp' ? '' : opt('chain:' + i,
+    'CL' + (i + 1) + ' · ' + nameById(l.id) + (l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : ''), sel(i)))).join('');
   /** Texto y carta del efecto que permite la invocación: '' (procedimiento normal) | 'chain:i' | 'other'. */
   function sourceReq(src) {
     if (!src) return {};
@@ -806,11 +965,14 @@
     if (String(e.text).includes(names.join(', '))) e.text = String(e.text).replace(names.join(', '), details.join(', '));
     else e.text += ' · ' + details.join(', ');
     if (p.position === 'def' && !/en DEF/.test(e.text)) e.text += ', en DEF';
+    const from = {};
+    asg.forEach((a) => { const f = find(a.uid); if (f) from[a.uid] = fromKey(f.loc); });
     asg.forEach((a) => {
       const r = detach(a.uid);
       if (r) placeSummoned(r.card, a.zone, 'pendulum', p.position);
     });
     afterPlay(v);
+    botEvent({ type: 'summon', uids: asg.map((a) => a.uid), method: 'pendulum', from });
   }
 
   /* ---------- Invocación Especial (ventana) ---------- */
@@ -823,17 +985,14 @@
     const zones = legalZones(uid, [], 'special');
     const procs = effectsOf(c).filter((x) => x.kind === 'summon');
     // Zona automática para la opción marcada al abrir (con su procedimiento puede ser otra: Lucina va al centro)
-    const ownFirst = !!(opts.own || !S.chain.length) && procs.length;
+    const lastCL = ownTopCL();
+    const ownFirst = !!(opts.own || lastCL < 0) && procs.length;
     const auto = ownFirst ? bestZone({ method: 'special', uid, materials: [], ownProcedure: true, effectIndex: opts.effectIndex != null ? opts.effectIndex : procs[0].index })
       : zones[0] || autoZone(uid, [], 'special');
     // Cartas cuyo efecto puede dar la invocación: primero las de la cadena
     const opt = (v, label, sel) => '<option value="' + esc(v) + '"' + (sel ? ' selected' : '') + '>' + esc(label) + '</option>';
-    const lastCL = S.chain.length - 1;
     let srcHtml = opt('own', 'Por su propio efecto o procedimiento', opts.own || lastCL < 0);
-    if (S.chain.length) {
-      srcHtml += '<optgroup label="Por el efecto en la cadena">' + S.chain.map((l, i) => opt('chain:' + i,
-        'CL' + (i + 1) + ' · ' + nameById(l.id) + (l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : ''), !opts.own && i === lastCL)).join('') + '</optgroup>';
-    }
+    if (lastCL >= 0) srcHtml += '<optgroup label="Por el efecto en la cadena">' + ownLinkOpts(opt, (i) => !opts.own && i === lastCL) + '</optgroup>';
     const fieldTops = FIELD_ZONES.map((z) => S.zones[z][0]).filter((x) => x && !x.faceDown);
     [['en el campo', fieldTops], ['en la mano', S.hand], ['en el cementerio', S.gy], ['desterradas', S.ban]].forEach(([where, list]) => {
       const seen = new Set();
@@ -968,9 +1127,13 @@
     }
     const wasSet = st && loc.area === 'field' && inst.faceDown;
     const req = activationReq(uid, fx, zone);
-    const v = merge(checkActivation(req), zone ? checkPlacement(S, uid, zone, { method: fx.scale ? 'scale' : 'activate', vacating: oldField ? [oldField.uid] : [] }) : null);
+    // Con la cadena en pausa (estás haciendo tus eslabones antes del rival) no se activa nada nuevo
+    const mid = S.chain.some((l) => l.done) ? { ok: false, errors: ['La cadena se está resolviendo: toca «Seguir resolviendo» antes de activar otro efecto.'], warnings: [] } : null;
+    const v = merge(checkActivation(req), mid, zone ? checkPlacement(S, uid, zone, { method: fx.scale ? 'scale' : 'activate', vacating: oldField ? [oldField.uid] : [] }) : null);
     gate(v, () => {
-      if (!find(uid)) return;
+      const f1 = find(uid);
+      if (!f1) return;
+      const from = fromKey(f1.loc); // de dónde se activa (mano, cementerio, zona...): el rival lo mira
       snapshot();
       const n = S.chain.length + 1;
       const chainBefore = S.chain.length;
@@ -994,10 +1157,12 @@
         uid, id: inst.id, effectIndex: fx.index, text: shortText(fx), speed: fx.speed || ruleLink.speed || 1, kind: fx.kind,
         cardAct: !!fx.scale || (st && (!!zone || wasSet || fx.kind === 'activation')), scale: !!fx.scale,
         snap: histBase + history.length - 1, // foto de antes de declarar (para "Deshacer última declaración")
+        owner: 'me', from,
       };
-      if (S.chain.length > chainBefore) Object.assign(S.chain[S.chain.length - 1], { snap: link.snap, cardAct: link.cardAct, kind: link.kind, scale: link.scale });
+      if (S.chain.length > chainBefore) Object.assign(S.chain[S.chain.length - 1], { snap: link.snap, cardAct: link.cardAct, kind: link.kind, scale: link.scale, owner: 'me', from });
       else S.chain.push(link);
       afterPlay(v);
+      botEvent({ type: 'activation', link: S.chain.length - 1 });
     });
   }
 
@@ -1102,17 +1267,63 @@
     });
   }
 
-  /** Resuelve la cadena de la última a la primera; las Mágicas/Trampas normales que se activaron van al cementerio. */
+  /** Resuelve la cadena de la última a la primera; las Mágicas/Trampas normales que se activaron van al cementerio.
+   * Los eslabones negados no hacen nada; los del rival aplican su efecto (YGO.bot.resolveLink).
+   * Tus eslabones los haces tú a mano: si hay alguno encima de uno del rival, la cadena se pausa antes del rival
+   * (los resueltos quedan marcados done) para que los hagas primero; "Seguir resolviendo" continúa. */
   function resolveChain() {
     if (!S.chain.length) return;
     snapshot();
-    const toGy = [];
+    const negatedMine = [];
+    const doing = []; // tus eslabones resueltos en esta pasada (los haces a mano)
+    let stop = -1;
     for (let i = S.chain.length - 1; i >= 0; i--) {
       const l = S.chain[i];
-      const c = db.get(l.id);
-      pushLog({ kind: 'resolve', text: 'Resuelve CL' + (i + 1) + ': ' + q(nameById(l.id)) + (l.scale ? ' (Escala de Péndulo)' : l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : '') });
-      if (l.cardAct && c && !db.isMonster(c) && !(c.type & (T.CONTINUOUS | T.FIELD | T.EQUIP))) toGy.push(l.uid);
+      if (l.done) continue;
+      const opp = l.owner === 'opp';
+      // Ash y Belle solo niegan un eslabón de abajo: no importa el orden. Si tu respuesta lo niega, tampoco.
+      if (opp && !l.negated && doing.length && !['Ash', 'Belle'].includes(shortName(l.handtrap || nameById(l.id)))
+        && !botCall('negatedBy', [S, i], null)) { stop = i; break; }
+      l.done = true;
+      if (l.negated) {
+        const fizzle = !opp && l.negated.fizzle;
+        pushLog({ kind: opp ? 'opp' : 'resolve', text: 'CL' + (i + 1) + ': ' + q(nameById(l.id)) + (fizzle ? ' ya no puede usar la carta que necesitaba' : ' queda negado')
+          + (l.negated.by ? ' (por ' + byText(l.negated.by) + ')' : '')
+          + (opp ? '' : fizzle ? ' · Haz solo lo que no necesite esa carta' : ' · No hagas lo que dice este efecto') });
+        if (opp) {
+          // El rival anota que quedó negada y su carta deja la cadena; sus operaciones no se aplican
+          if (!Array.isArray(botCall('resolveLink', [S, i], null))) oppNegated(l, i);
+        } else if (!fizzle) negatedMine.push('CL' + (i + 1));
+      } else if (opp) {
+        const ops = botCall('resolveLink', [S, i], []);
+        if (l.negated) {
+          // El rival vio que lo negaste (Called by the Grave / Crossout Designator sobre esa handtrap): no hace nada
+          pushLog({ kind: 'opp', text: 'CL' + (i + 1) + ': ' + q(nameById(l.id)) + ' queda negado' + (l.negated.by ? ' (por ' + byText(l.negated.by) + ')' : '') });
+          markOppHistory(l, true);
+        } else {
+          pushLog({ kind: 'opp', text: 'Resuelve CL' + (i + 1) + ' (rival): ' + q(nameById(l.id)) });
+          applyOppOps(ops, l);
+        }
+      } else {
+        pushLog({ kind: 'resolve', text: 'Resuelve CL' + (i + 1) + ': ' + q(nameById(l.id)) + (l.scale ? ' (Escala de Péndulo)' : l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : '') });
+      }
+      if (!opp && (!l.negated || l.negated.fizzle)) doing.push('CL' + (i + 1));
     }
+    if (stop >= 0) {
+      const who = q(nameById(S.chain[stop].id));
+      pushLog({ kind: 'resolve', text: 'Pausa antes de CL' + (stop + 1) + ' (rival, ' + who + '): primero haz lo que dice' + (doing.length > 1 ? 'n ' : ' ') + listEs(doing) });
+      render();
+      if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
+      openDialog('Primero tus eslabones', '<p>' + listEs(doing) + (doing.length > 1 ? ' se resuelven' : ' se resuelve') + ' antes que CL' + (stop + 1) + ' del rival (' + esc(who) + ').</p>'
+        + '<p class="hint">Haz ahora en el campo lo que ' + (doing.length > 1 ? 'dicen' : 'dice') + ' (por ejemplo, la Invocación). Después toca <b>Seguir resolviendo</b> para que se resuelva el eslabón del rival.</p>',
+      [{ label: 'Entendido', kind: 'primary' }]);
+      return;
+    }
+    // Al cerrar la cadena, tus Mágicas/Trampas Normales activadas van al cementerio
+    const toGy = S.chain.filter((l) => {
+      const c = db.get(l.id);
+      return l.owner !== 'opp' && l.cardAct && c && !db.isMonster(c) && !(c.type & (T.CONTINUOUS | T.FIELD | T.EQUIP));
+    }).map((l) => l.uid);
     const sent = [];
     toGy.forEach((uid) => {
       const loc = locate(uid);
@@ -1122,30 +1333,60 @@
       sent.push(q(nameById(r.card.id)));
     });
     if (sent.length) pushLog({ kind: 'resolve', text: 'Al cerrar la cadena van al cementerio: ' + sent.join(', ') });
+    const resolved = S.chain;
     S.chain = [];
+    render();
+    if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
+    // chain: la cadena que se acaba de resolver (el rival mira si tus Called by the Grave quedaron negados)
+    botEvent({ type: 'resolved', chain: JSON.parse(JSON.stringify(resolved)) });
+  }
+
+  /** Marca o desmarca un eslabón como negado (p. ej. respondiste a Ash Blossom con Called by the Grave). */
+  function toggleNegated(i) {
+    const l = S.chain[i];
+    if (!l) return;
+    snapshot();
+    const name = q(nameById(l.id));
+    if (l.negated) {
+      delete l.negated;
+      if (l.owner === 'opp') markOppHistory(l, false);
+      pushLog({ kind: 'activation', text: 'Quita la marca de negado de CL' + (i + 1) + ' (' + name + ')' });
+    } else {
+      // Quién lo niega: el último eslabón del otro jugador encima de este (si hay)
+      const opp = l.owner === 'opp';
+      let by = '';
+      for (let k = S.chain.length - 1; k > i && !by; k--) if ((S.chain[k].owner === 'opp') !== opp) by = nameById(S.chain[k].id);
+      l.negated = { by, manual: true };
+      if (opp) markOppHistory(l, true);
+      pushLog({ kind: 'activation', text: 'Marca CL' + (i + 1) + ' (' + name + ') como negado' + (by ? ' (por ' + q(by) + ')' : '') });
+    }
     render();
   }
 
-  /** Vuelve a como estaba todo justo antes de declarar el último eslabón. */
+  /** Vuelve a como estaba todo justo antes de declarar el último eslabón.
+   * Si el último es del rival, se deshace la jugada tuya a la que respondió (y su respuesta). */
   function undoDeclaration() {
     const n = S.chain.length;
     const l = S.chain[n - 1];
     if (!l) return;
     const name = q(nameById(l.id));
+    const opp = l.owner === 'opp';
     const i = typeof l.snap === 'number' ? l.snap - histBase : -1;
     if (i >= 0 && i < history.length) {
       const prev = JSON.parse(history[i]);
-      if (Array.isArray(prev.chain) && prev.chain.length < n) {
+      if (Array.isArray(prev.chain) && (prev.chain.length < n || opp)) {
         const after = history.length - 1 - i;
         S = prev;
         history.length = i;
         selected = null;
         pending = null;
         render();
-        toast('Se deshizo CL' + n + ' (' + name + ')' + (after ? ' y lo que hiciste después' : ''), 'ok');
+        toast(opp ? 'Se deshizo tu última jugada y la respuesta del rival (' + name + ')'
+          : 'Se deshizo CL' + n + ' (' + name + ')' + (after ? ' y lo que hiciste después' : ''), 'ok');
         return;
       }
     }
+    if (opp) { toast('La respuesta del rival no se deshace: respóndele con un efecto o márcala como negada', 'warn'); return; }
     // Sin foto (historial recortado): solo se quita el eslabón
     snapshot();
     S.chain.pop();
@@ -1200,6 +1441,7 @@
       ensureState();
       pushLog({ kind: 'phase', text: 'Fase: ' + phaseName(S.turnState.phase) }, v);
       afterPlay(v);
+      botEvent({ type: 'phase', phase: S.turnState.phase });
     });
   }
   function nextPhase() {
@@ -1207,17 +1449,27 @@
     gate(v, () => {
       snapshot();
       const turn = S.turnState.turn;
+      const mine = S.turnState.mine;
       run('nextPhase', [S], () => localNextPhase(S));
       ensureState();
       const t = S.turnState;
       pushLog({ kind: 'phase', text: t.turn !== turn ? 'Empieza el turno ' + t.turn + ' (' + (t.mine ? 'tu turno' : 'turno rival') + ')' : 'Fase: ' + phaseName(t.phase) }, v);
       afterPlay(v);
+      botEvent({ type: 'phase', phase: t.phase });
+      // Después de tu Fase Final empieza el turno rival: termina el intento
+      if (t.turn !== turn && mine && oppOn()) endAttempt();
     });
   }
   function passTurn() {
     const v = phaseVerdict(null);
     gate(v, () => {
+      const mine = S.turnState.mine;
       snapshot();
+      // Eslabones del rival que quedan sin resolver: su carta deja la cadena sin hacer nada (no "te cortó")
+      if (oppOn() && S.chain.some((l) => l && l.owner === 'opp' && !l.done)) {
+        arr(botCall('observe', [S, { type: 'resolved', abandoned: true, chain: JSON.parse(JSON.stringify(S.chain)) }], []))
+          .forEach((n) => { if (n && n.text) pushLog(Object.assign({}, n, { kind: 'opp' })); });
+      }
       pushLog({ kind: 'phase', text: 'Termina el turno ' + S.turnState.turn }, v);
       run('passTurn', [S], () => localPassTurn(S));
       ensureState();
@@ -1226,6 +1478,9 @@
       selected = null;
       afterPlay(v);
       toast('Turno ' + S.turnState.turn + ': ' + (S.turnState.mine ? 'tu turno' : 'turno rival'), 'ok');
+      botEvent({ type: 'phase', phase: S.turnState.phase });
+      // Pasar tu turno contra el rival termina el intento: se guarda y se ve el resumen
+      if (mine && oppOn()) endAttempt();
     });
   }
 
@@ -1240,6 +1495,15 @@
     const extraMon = db.isExtra(c);
     const add = (label, fn, kind) => acts.push({ label, fn, kind });
     const fx = () => openEffects(uid);
+
+    // Ficha (Primal Being Token): no tiene efectos; solo cambia de posición, se mueve o deja el campo (y desaparece)
+    if (inst.token) {
+      if (isTop && isMonsterZone(loc.zone)) add(inst.def ? 'Cambiar a ATK' : 'Cambiar a DEF', () => changePosition(uid, inst.def ? 'atk' : 'def'), 'primary');
+      acts.push({ group: 'Movimientos manuales' });
+      add('Mover a una zona…', () => startPending('move', uid));
+      add('Quitar del campo (desaparece)', () => move(uid, 'gy'));
+      return acts;
+    }
 
     if (!onField) {
       if (db.isMonster(c)) {
@@ -1569,21 +1833,30 @@
     return S.chain.map((l, i) => (l.uid === uid ? 'CL' + (i + 1) : '')).filter(Boolean).join(' ');
   }
 
+  /** Eslabones del rival que apuntan a esta carta (Veiler, Impermanence, Ogre, Crow...). */
+  function oppTargets(uid) {
+    return S.chain.map((l, i) => (l.owner === 'opp' && !l.negated && l.target && l.target.uid === uid ? 'CL' + (i + 1) + ' ' + nameById(l.id) : '')).filter(Boolean);
+  }
+
   function tileFor(inst, reveal, inZone) {
-    const c = db.get(inst.id);
+    const c = cardOf(inst);
     const p = pending && pending.kind === 'summon' ? pending : null;
     const cls = [inst.uid === selected ? 'sel' : '', inst.def ? 'is-def' : '', inst.faceDown && !reveal ? 'is-down' : '',
       p && p.picks.includes(inst.uid) ? 'pick' : '', p && p.method !== 'pendulum' && p.uid === inst.uid ? 'summoning' : ''].join(' ');
-    const html = view.tile(c, { attrs: 'data-uid="' + inst.uid + '" draggable="true" tabindex="0"' });
+    const attrs = 'data-uid="' + inst.uid + '" draggable="true" tabindex="0"';
+    const html = inst.token ? tokenTile(c, attrs) : view.tile(c, { attrs });
     const cl = !inZone && chainTag(inst.uid);
+    const hit = oppTargets(inst.uid);
     return '<div class="slot-card ' + cls + '">' + html + (inst.faceDown && !reveal ? '<span class="down-label">' + esc(c.name) + '</span>' : '')
-      + (cl ? '<span class="cl-badge">' + cl + '</span>' : '') + '</div>';
+      + (cl ? '<span class="cl-badge">' + cl + '</span>' : '')
+      + (hit.length ? '<span class="opp-hit" title="Objetivo del rival: ' + esc(hit.join(', ')) + '">↯</span>' : '') + '</div>';
   }
 
   function zoneHtml(z, label, ctx) {
     const stack = S.zones[z];
     const mats = stack.length > 1 ? '<span class="mats" title="Materiales">' + (stack.length - 1) + '</span>' : '';
     const lv = stack.length && typeof stack[0].level === 'number' && !stack[0].faceDown ? '<span class="lv-badge" title="Nivel cambiado por un efecto">Nv ' + stack[0].level + '</span>' : '';
+    const neg = stack.length && isNegated(stack[0]) ? '<span class="neg-badge" title="Efectos negados este turno (por ' + esc(byText(stack[0].negated.by)) + ')">Negado</span>' : '';
     let target = false;
     const dest = ctx.dest.has(z);
     if (pending && pending.kind === 'summon') target = !stack.length && !dest && ctx.cands.has(z);
@@ -1595,7 +1868,7 @@
     const cl = stack.length ? chainTag(stack[0].uid) : '';
     return '<div class="zone-slot z-' + z.replace(/\d/, '') + (target ? ' target' : '') + (dest ? ' dest' : '') + (ctx.linked.has(z) ? ' linked' : '')
       + '" data-zone="' + z + '" tabindex="0" aria-label="' + label + '">'
-      + (stack.length ? tileFor(stack[0], false, true) + mats + lv : '<span class="zl">' + (dest ? 'Destino' : label) + '</span>')
+      + (stack.length ? tileFor(stack[0], false, true) + mats + lv + neg : '<span class="zl">' + (dest ? 'Destino' : label) + '</span>')
       + (stack.length && dest ? '<span class="dest-tag">Destino</span>' : '')
       + (cl ? '<span class="cl-badge">' + cl + '</span>' : '') + '</div>';
   }
@@ -1637,9 +1910,12 @@
   function render() {
     if (!S) return;
     ensureState();
+    if (sweepTokens()) toast('Las fichas desaparecen cuando dejan el campo');
     if (pending && !locate(pending.uid)) pending = null;
     if (pending && pending.kind === 'summon') pending.picks = pending.picks.filter((u) => locate(u));
-    $$('#fd-size button').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.n) === prefs.handSize)));
+    // Primero / Segundo: lo del duelo actual
+    const second = !!(S.start ? S.start.second : S.turnState.turn === 2);
+    $$('#fd-order button').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.order === 'second') === second)));
     const st = ['Zona de Péndulo / M/T', 'M/T', 'M/T', 'M/T', 'Zona de Péndulo / M/T'];
     const ctx = boardCtx();
     $('#board').innerHTML =
@@ -1653,6 +1929,7 @@
     $('#fd-undo').disabled = !history.length;
     $('#fd-lp').value = S.lp;
     renderTurn();
+    renderOpp();
     renderPending();
     renderChain();
     renderLog();
@@ -1671,6 +1948,8 @@
     $('#fd-ns').innerHTML = 'Invocación Normal: <b class="' + (used ? 'ns-used' : 'ns-free') + '">' + (used ? 'usada' : 'disponible') + '</b>';
     $('#fd-strict').checked = strict();
     $('#fd-log-btn').textContent = 'Registro (' + S.log.length + ')';
+    // "Terminar intento": contra el rival o si el mazo tiene campo objetivo
+    $('#fd-end').hidden = !(oppOn() || attemptTarget().length);
   }
 
   /** Banda de arriba del tablero: mover a una zona, o elegir materiales con revisión en vivo. */
@@ -1735,7 +2014,7 @@
       const opt = (k, l) => '<option value="' + esc(k) + '"' + (k === p.src ? ' selected' : '') + '>' + esc(l) + '</option>';
       row += '<label><span>Por</span><select id="fd-pick-src">'
         + opt('', p.method === 'fusion' || p.method === 'ritual' ? 'Sin indicar el efecto' : 'Su procedimiento (sin efecto)')
-        + S.chain.map((l, i) => opt('chain:' + i, 'CL' + (i + 1) + ' · ' + nameById(l.id) + (l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : ''))).join('')
+        + ownLinkOpts((k, l) => opt(k, l), () => false)
         + opt('other', 'Otro efecto') + '</select></label>';
     }
     if (p.method !== 'pendulum') {
@@ -1801,10 +2080,26 @@
       : '<header class="chain-head"><h3>Cadena</h3><span class="count">' + n + '</span></header>';
     if (!n) return head + '<p class="chain-empty">Sin cadena abierta. Al activar un efecto aparece aquí.</p>';
     if (strip && chainFolded) return head;
-    return head + '<ol class="chain-list">' + S.chain.map((l, i) => '<li><span class="cl">CL' + (i + 1) + '</span><span class="cl-body"><b>' + esc(nameById(l.id)) + '</b>'
-      + (l.scale ? ' <span class="cl-fx">Escala</span>' : l.effectIndex ? ' <span class="cl-fx">efecto ' + l.effectIndex + '</span>' : '')
-      + (l.text ? '<span class="cl-text">' + esc(l.text) + '</span>' : '') + '</span></li>').join('') + '</ol>'
-      + '<div class="chain-btns"><button type="button" class="primary" data-chain="resolve">Resolver cadena</button>'
+    // Eslabones del rival en rojo; cada eslabón se puede marcar como negado (p. ej. por Called by the Grave)
+    const paused = S.chain.some((l) => l.done);
+    return head + '<ol class="chain-list">' + S.chain.map((l, i) => {
+      const opp = l.owner === 'opp';
+      const neg = l.negated;
+      if (l.done) {
+        return '<li class="' + (opp ? 'opp' : 'mine') + ' done' + (neg ? ' negated' : '') + '"><span class="cl">CL' + (i + 1) + '</span><span class="cl-body">'
+          + (opp ? '<span class="cl-who">Rival</span>' : '') + '<b>' + esc(nameById(l.id)) + '</b><span class="cl-done">Resuelto</span>'
+          + (!opp && !neg ? '<span class="cl-hint">Hazlo ahora en el campo</span>' : '') + '</span></li>';
+      }
+      return '<li class="' + (opp ? 'opp' : 'mine') + (neg ? ' negated' : '') + '"><span class="cl">CL' + (i + 1) + '</span><span class="cl-body">'
+        + (opp ? '<span class="cl-who">Rival</span>' : '') + '<b>' + esc(nameById(l.id)) + '</b>'
+        + (l.scale ? ' <span class="cl-fx">Escala</span>' : !opp && l.effectIndex ? ' <span class="cl-fx">efecto ' + l.effectIndex + '</span>' : '')
+        + (neg ? '<span class="cl-neg">' + (neg.fizzle ? 'Sin su carta' : 'Negado') + (neg.by ? ' · por ' + esc(byText(neg.by)) : '') + '</span>'
+          + (opp ? '' : '<span class="cl-hint">' + (neg.fizzle ? 'Ya no puede usar la carta desterrada' : 'No hagas lo que dice este efecto') + '</span>') : '')
+        + (l.text ? '<span class="cl-text">' + esc(l.text) + '</span>' : '') + '</span>'
+        + '<button type="button" class="cl-negbtn" data-neg="' + i + '" aria-pressed="' + !!neg + '" title="'
+        + (neg ? 'Quitar la marca de negado' : 'Marcar como negado (por ejemplo, con Called by the Grave)') + '">' + (neg ? 'Quitar' : 'Negado') + '</button></li>';
+    }).join('') + '</ol>'
+      + '<div class="chain-btns"><button type="button" class="primary" data-chain="resolve">' + (paused ? 'Seguir resolviendo' : 'Resolver cadena') + '</button>'
       + '<button type="button" data-chain="undo">Deshacer última declaración</button></div>';
   }
   function renderChain() {
@@ -1865,12 +2160,13 @@
     }
     document.body.classList.add('fd-selected');
     const inst = loc.list[loc.index];
-    const c = db.get(inst.id);
+    const c = cardOf(inst);
     const t = S.turnState;
     let where = loc.area === 'field' ? (loc.index ? 'Material de un monstruo' : 'En el campo' + (inst.faceDown ? ', boca abajo' : '') + (inst.def ? ', en DEF' : ''))
       : 'En ' + PILE_NAMES[loc.area].toLowerCase();
     if (loc.area === 'field' && !loc.index && inst.summonMethod && inst.summonedTurn === t.turn) where += ' · ' + (METHOD[inst.summonMethod] || 'Invocación') + ' este turno';
-    $('#fd-detail').innerHTML = '<p class="fd-where">' + esc(where) + '</p>' + view.detail(c);
+    if (loc.area === 'field' && isNegated(inst)) where += ' · Efectos negados (por ' + byText(inst.negated.by) + ')';
+    $('#fd-detail').innerHTML = '<p class="fd-where">' + esc(where) + '</p>' + (inst.token ? tokenDetail(c) : view.detail(c));
     const acts = actionsFor(selected);
     $('#fd-actions').innerHTML = '<p class="fd-act-name">' + esc(c.name) + '</p><div class="fd-act-grid">'
       + acts.map((a, i) => (a.group ? '<p class="fd-act-group">' + esc(a.group) + '</p>'
@@ -1881,6 +2177,538 @@
 
   function renderDeckSelect() {
     $('#fd-deck').innerHTML = decks().map((x) => '<option value="' + x.id + '"' + (x === d ? ' selected' : '') + '>' + esc(x.name) + '</option>').join('');
+  }
+
+  /* ---------- Rival con handtraps (js/bot.js) ----------
+   * El rival no juega su turno: solo responde a tus jugadas con las handtraps de su mano. Todo lo suyo vive en S.opp
+   * (así "Deshacer" lo incluye). Cada llamada a YGO.bot pasa por botCall: si el módulo falta o falla, no hay rival. */
+  const bot = () => { const B = window.YGO.bot; return B && typeof B === 'object' ? B : null; };
+  function botCall(name, args, fallback) {
+    const B = bot();
+    if (B && typeof B[name] === 'function') {
+      try { return B[name].apply(B, args); } catch (err) { console.warn('YGO.bot.' + name + ' falló', err); }
+    }
+    return typeof fallback === 'function' ? fallback() : fallback;
+  }
+  const oppOn = () => !!(S && S.opp && S.opp.enabled);
+  /** Cuántas handtraps tiene el rival: 0 (sin rival) | 2 | 3 | '2-3'. */
+  const normCount = (n) => (n === '2-3' ? '2-3' : Number(n) === 2 || Number(n) === 3 ? Number(n) : 0);
+  const HT = () => { const B = bot(); return B && B.HANDTRAPS && typeof B.HANDTRAPS === 'object' ? B.HANDTRAPS : {}; };
+  const shortName = (name) => { const h = HT()[name]; return (h && h.short) || name; };
+  const idByName = (name) => { const h = HT()[name]; const c = (h && h.id && db.get(h.id)) || db.findByName(name); return c ? c.id : 0; };
+  /** Lista de handtraps con al menos una copia ([{ name, copies }]); si no hay, la de fábrica. */
+  function poolOf(pool) {
+    const B = bot();
+    const known = (n) => !B || typeof B.isHandtrap !== 'function' || B.isHandtrap(n);
+    const ok = arr(pool).filter((x) => x && x.name && known(String(x.name)) && Math.floor(Number(x.copies)) > 0)
+      .map((x) => ({ name: String(x.name), copies: Math.floor(Number(x.copies)) }));
+    if (ok.length) return ok;
+    return B ? arr(B.DEFAULT_POOL).map((x) => ({ name: x.name, copies: x.copies })) : [];
+  }
+  /** Opciones del rival: las de opts.bot o, si no vienen, las de las preferencias (ventana Nuevo duelo). */
+  function botConfig(b) {
+    freshPrefs();
+    const count = normCount(prefs.botCount);
+    const base = { enabled: count !== 0, count, mode: prefs.botMode === 'aggressive' ? 'aggressive' : 'smart', pool: poolOf(prefs.botPool) };
+    if (!b || typeof b !== 'object') return base;
+    const out = Object.assign({}, base, b);
+    out.enabled = b.enabled !== false;
+    out.count = normCount(b.count !== undefined ? b.count : count) || (arr(b.forceHand).length || '2-3');
+    out.mode = out.mode === 'aggressive' ? 'aggressive' : 'smart';
+    out.pool = poolOf(out.pool);
+    return out;
+  }
+  function makeOpponent(cfg) {
+    if (!cfg || !cfg.enabled || !bot()) return null;
+    const o = { enabled: true, pool: cfg.pool, count: cfg.count, mode: cfg.mode, starters: arr(d.starters).slice() };
+    if (typeof cfg.seed === 'number') o.seed = cfg.seed;
+    if (Array.isArray(cfg.forceHand)) o.forceHand = cfg.forceHand.slice();
+    const opp = botCall('newOpponent', [o], null);
+    return opp && typeof opp === 'object' ? opp : null;
+  }
+
+  /** Avisa al rival de una jugada tuya: lleva sus cuentas (observe) y, en tu turno, decide si responde (consider).
+   * Si responde, su eslabón entra a la cadena y sale la ventana "El rival responde". No toma foto propia:
+   * "Deshacer" quita tu jugada y su respuesta juntas. */
+  function botEvent(ev) {
+    if (!oppOn()) return null;
+    const notes = arr(botCall('observe', [S, ev], []));
+    notes.forEach((n) => { if (n && n.text) pushLog(Object.assign({}, n, { kind: 'opp' })); });
+    const r = S.turnState.mine && !pending ? botCall('consider', [S, ev], null) : null;
+    if (!r || typeof r !== 'object') { if (notes.length) render(); return null; }
+    const before = S.chain.length;
+    const e = botCall('commit', [S, r], null);
+    if (!e && S.chain.length === before) { if (notes.length) render(); return null; }
+    if (S.chain.length > before) {
+      const l = S.chain[S.chain.length - 1];
+      l.owner = 'opp';
+      // Foto de tu jugada a la que responde (para "Deshacer última declaración")
+      if (l.snap == null && history.length) l.snap = histBase + history.length - 1;
+    }
+    pushLog(Object.assign({ text: r.text || 'El rival activa ' + q(r.handtrap || nameById(r.id)) }, e && typeof e === 'object' ? e : {}, { kind: 'opp' }));
+    render();
+    showOpp(r);
+    return r;
+  }
+
+  /** Ventana "El rival responde": qué activó, sobre qué y (modo Inteligente) por qué ahora. */
+  function showOpp(r) {
+    if (document.body.dataset.mode !== 'campo') { oppQueued = r; return; }
+    oppQueued = null;
+    const c = db.get(r.id) || db.get(idByName(r.handtrap));
+    const h = HT()[r.handtrap || (c && c.name)] || {};
+    const smart = !S.opp || S.opp.mode !== 'aggressive';
+    const body = '<div class="opp-resp">' + (c ? '<div class="opp-resp-card">' + view.tile(c) + '</div>' : '')
+      + '<div class="opp-resp-text"><p class="opp-resp-line">' + esc(r.text || ('El rival activa ' + q(r.handtrap || ''))) + '</p>'
+      + (smart && r.reason ? '<p class="opp-resp-why"><b>Por qué ahora:</b> ' + esc(r.reason) + '</p>' : '')
+      + (h.what ? '<p class="hint">' + esc(h.what) + '</p>' : '') + '</div></div>'
+      + '<p class="hint">Puedes responder declarando un efecto (por ejemplo «Called by the Grave» o «Crossout Designator»); si lo niegas, toca <b>Negado</b> en su eslabón. Si no respondes, toca <b>Resolver cadena</b>.</p>';
+    openDialog('El rival responde', body, [{ label: 'Responder' }, { label: 'Resolver cadena', kind: 'primary', action: resolveChain }]);
+  }
+
+  /** Eslabón del rival negado: no hace nada. Su carta, si quedó en su campo, va al cementerio (o vuelve a su mano si es un monstruo). */
+  function oppNegated(l, i) {
+    if (bot() && typeof bot().negatedLink === 'function') { botCall('negatedLink', [S, i], null); return; }
+    const o = S.opp;
+    const k = arr(o && o.field).findIndex((x) => x && x.uid === l.uid);
+    if (k < 0) return;
+    const [card] = o.field.splice(k, 1);
+    delete card.onChain;
+    const c = db.get(card.id);
+    if (c && db.isMonster(c)) { if (Array.isArray(o.hand)) o.hand.push(card); } else if (Array.isArray(o.gy)) o.gy.push(card);
+  }
+  /** Marca en el historial del rival que esa handtrap fue negada (para el resumen del intento). */
+  function markOppHistory(l, on) {
+    const h = arr(S.opp && S.opp.history);
+    const name = l.handtrap || nameById(l.id);
+    for (let k = h.length - 1; k >= 0; k--) {
+      const x = h[k];
+      if (x && (x.uid ? x.uid === l.uid : x.name === name && x.turn === S.turnState.turn) && !!x.negated !== on) { x.negated = on; return; }
+    }
+  }
+
+  /** Aplica lo que hace un eslabón del rival al resolverse (ops de YGO.bot.resolveLink). */
+  function applyOppOps(ops, l) {
+    const src = l.handtrap || nameById(l.id);
+    const logFrom = S.log.length;
+    let tributed = [];
+    let token = ''; // ficha ya anotada (el resumen del rival sobre ella sobra)
+    arr(ops).forEach((op) => {
+      if (!op || typeof op !== 'object') return;
+      const by = byText(op.by || src);
+      try {
+        if (op.op === 'negateLink') {
+          // fizzle (D.D. Crow): el eslabón no está negado, pero ya no puede usar la carta que se desterró
+          const t = S.chain[op.index];
+          if (t && !t.negated) t.negated = op.fizzle ? { by: op.by || src, fizzle: true } : { by: op.by || src };
+        } else if (op.op === 'negateMonster') {
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'field') return;
+          f.inst.negated = { turn: S.turnState.turn, by: op.by || src };
+          pushLog({ kind: 'opp', text: 'Los efectos de ' + q(f.c.name) + ' quedan negados este turno (por ' + by + ')' });
+        } else if (op.op === 'destroy') {
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'field') return;
+          const went = leaveField(op.uid);
+          pushLog({ kind: 'opp', text: q(f.c.name) + ' es destruido (por ' + by + ')' + (went === 'extra' ? ': va boca arriba al Extra Deck' : went === 'gone' ? ' y desaparece' : '') });
+          if (went === 'extra') toast(PEND_TOAST);
+        } else if (op.op === 'banish') {
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'gy') return;
+          S.ban.push(S.gy.splice(f.loc.index, 1)[0]);
+          pushLog({ kind: 'opp', text: q(f.c.name) + ' queda desterrada de tu Cementerio (por ' + by + ')' });
+        } else if (op.op === 'tributeAll') tributed = tributeAll(by, op.uids);
+        else if (op.op === 'token') { placeToken(op, tributed, by); token = op.name || 'Primal Being Token'; }
+        else if (op.op === 'lock' && op.lock) {
+          const lock = Object.assign({ source: src }, op.lock);
+          run('addLock', [S, lock], () => { const t = S.turnState; if (!Array.isArray(t.locks)) t.locks = []; t.locks.push(lock); });
+          pushLog({ kind: 'opp', text: lock.text || 'Bloqueo por ' + by + ' hasta el final del turno' });
+        } else if (op.op === 'log' && op.text) {
+          // Sin repetir lo que ya se anotó al aplicar este eslabón (p. ej. el texto del bloqueo de Droll o la ficha de Nibiru)
+          const seen = S.log.slice(logFrom).some((e) => e && e.text === String(op.text)) || (token && String(op.text).includes(token));
+          if (!seen) pushLog({ kind: 'opp', text: String(op.text) });
+        }
+      } catch (err) { console.warn('No se pudo aplicar el efecto del rival', op, err); }
+    });
+  }
+  /** Una carta deja el campo por un efecto del rival: las fichas desaparecen; los Péndulo van boca arriba al Extra Deck. */
+  function leaveField(uid) {
+    const f = find(uid);
+    if (!f) return null;
+    if (f.inst.token) { takeStack(uid).slice(1).forEach((m) => S.gy.push(resetCard(m))); return 'gone'; }
+    return sendMaterial(uid, 'gy') || 'gy';
+  }
+  /** Nibiru: se sacrifican todos los monstruos boca arriba de tu campo (o los de uids, si el rival los dice).
+   * Devuelve sus ATK/DEF originales. */
+  function tributeAll(by, uids) {
+    const out = [];
+    let pend = false;
+    [...EMZ, ...MZ].forEach((z) => {
+      const top = S.zones[z][0];
+      if (!top || top.faceDown || (Array.isArray(uids) && !uids.includes(top.uid))) return;
+      const c = cardOf(top);
+      out.push({ name: c.name, atk: statNum(c.atk), def: c.isLink ? 0 : statNum(c.def) });
+      if (leaveField(top.uid) === 'extra') pend = true;
+    });
+    pushLog({ kind: 'opp', text: out.length ? 'Se sacrifican ' + listEs(out.map((x) => q(x.name))) + ' (por ' + by + ')' : 'No hay monstruos boca arriba para sacrificar (' + by + ')' });
+    if (pend) toast(PEND_TOAST);
+    return out;
+  }
+  /** Ficha en tu campo (Primal Being Token): ATK/DEF = suma de los ATK/DEF originales de lo sacrificado. */
+  function placeToken(op, tributed, by) {
+    const name = op.name || 'Primal Being Token';
+    const zone = firstEmpty(MZ);
+    if (!zone) { pushLog({ kind: 'opp', text: 'No queda una Zona de Monstruo libre para ' + q(name) }); return; }
+    const atk = typeof op.atk === 'number' ? op.atk : tributed.reduce((s, x) => s + x.atk, 0);
+    const def = typeof op.def === 'number' ? op.def : tributed.reduce((s, x) => s + x.def, 0);
+    const o2 = Object.assign({}, op, { name, atk, def });
+    // La instancia la arma el rival si sabe (código virtual de la ficha); si no, aquí
+    let inst = botCall('tokenInstance', [S, o2], null);
+    if (!inst || typeof inst !== 'object' || !inst.uid || !inst.token) {
+      inst = game.instance(Number(op.id) || idByName(name) || 0);
+      inst.token = { name, atk, def, level: op.level || 11, attribute: op.attribute || 'LIGHT', race: op.race || 'Rock' };
+      inst.summonedTurn = S.turnState.turn;
+      inst.summonMethod = 'special';
+      inst.def = op.position === 'def';
+    }
+    S.zones[zone].push(inst);
+    pushLog({ kind: 'opp', text: 'El rival invoca ' + q(name) + ' (ATK ' + atk + ' / DEF ' + def + ') en tu ' + placeName(zone) + (inst.def ? ', en DEF' : '') + ' (por ' + by + ')' });
+  }
+
+  /** Resumen del rival para el intento: { initialHand, used: [{ name, turn, on, negated }], unused, drew }. */
+  function oppSummary() {
+    const o = S.opp;
+    if (!o) return { initialHand: [], used: [], unused: [], drew: 0 };
+    const s = botCall('summary', [S], null);
+    if (s && typeof s === 'object') {
+      return { initialHand: arr(s.initialHand), used: arr(s.used).filter((u) => u && u.name), unused: arr(s.unused), drew: Number(s.drew) || 0 };
+    }
+    return {
+      initialHand: arr(o.initialHand),
+      used: arr(o.history).map((h) => ({ name: h.name, turn: h.turn, on: h.on || (typeof h.target === 'string' ? h.target : ''), negated: !!h.negated })),
+      unused: arr(o.hand).filter((x) => x && !x.blank).map((x) => nameById(x.id)), drew: 0,
+    };
+  }
+
+  /* ---------- Franja del rival (sobre el tablero) ---------- */
+  function renderOpp() {
+    const box = $('#fd-opp');
+    const st = attemptStats();
+    const statsBtn = '<button type="button" class="opp-btn opp-stats" data-opp="stats">Intentos'
+      + (st && st.total ? ' · ' + st.total + (st.pct !== null ? ' (' + game.pct(st.pct) + ')' : '') : '') + '</button>';
+    if (!oppOn()) {
+      box.className = 'fd-opp off';
+      box.innerHTML = '<span class="opp-tag">Rival</span><span class="opp-off">' + (bot() ? 'Sin handtraps' : 'No disponible') + '</span>'
+        + (bot() ? '<button type="button" class="opp-btn go" data-opp="setup">Jugar contra handtraps…</button>' : '') + statsBtn;
+      return;
+    }
+    const o = S.opp;
+    const hand = arr(o.hand);
+    const show = !!revealed[S.duelId];
+    const chip = (id, cls, title) => (id ? '<button type="button" class="opp-chip' + (cls ? ' ' + cls : '') + '" data-oppcard="' + id + '" title="' + esc(title || nameById(id)) + '">'
+      + esc(shortName(nameById(id))) + '</button>' : '<span class="opp-chip blank">Otra carta</span>');
+    const handHtml = show ? (hand.length ? hand.map((x) => chip(x && !x.blank ? x.id : 0)).join('') : '<span class="opp-none">sin cartas</span>')
+      : '<span class="opp-backs" aria-hidden="true">' + hand.map(() => '<i></i>').join('') + '</span>';
+    const used = arr(o.history).map((h) => {
+      const on = h.on || (typeof h.target === 'string' ? h.target : '');
+      return chip(idByName(h.name), 'used' + (h.negated ? ' neg' : ''), h.name + (on ? ' → ' + on : '') + (h.negated ? ' (negada)' : ''));
+    }).join('');
+    const field = arr(o.field).map((x) => chip(x && x.id)).join('');
+    const locks = arr(S.turnState.locks).filter((l) => l && l.kind === 'noDeckAdd')
+      .map((l) => '<span class="opp-lock" title="' + esc(l.text || '') + '">' + esc(shortName(l.source || 'Droll & Lock Bird')) + ': no añades del Mazo</span>').join('');
+    box.className = 'fd-opp';
+    box.innerHTML = '<span class="opp-tag">Rival</span><span class="opp-mode">' + (o.mode === 'aggressive' ? 'Agresivo' : 'Inteligente') + '</span>'
+      + '<span class="opp-group opp-hand" aria-label="Mano del rival: ' + hand.length + ' cartas"><span class="opp-label">Mano</span>' + handHtml
+      + (show ? '' : '<b class="opp-n">' + hand.length + '</b>')
+      + '<button type="button" class="opp-btn" data-opp="reveal" aria-pressed="' + show + '">' + (show ? 'Ocultar mano' : 'Ver mano') + '</button></span>'
+      + (field ? '<span class="opp-group"><span class="opp-label">En su campo</span>' + field + '</span>' : '')
+      + (used ? '<span class="opp-group"><span class="opp-label">Usó</span>' + used + '</span>' : '')
+      + locks + statsBtn;
+  }
+  function showCard(id) {
+    const c = db.get(id);
+    if (c) openDialog(c.name, '<div class="modal-detail">' + view.detail(c) + '</div>', [{ label: 'Cerrar', kind: 'primary' }]);
+  }
+
+  /* ---------- Nuevo duelo: turno, rival y lista de handtraps ---------- */
+  /** opts.deck: mazo nuevo (al cambiar el selector). state: lo elegido (al volver de la lista de handtraps).
+   * Si hay jugadas anotadas, el título avisa que se borran. Lo elegido se recuerda en las preferencias. */
+  function openSetup(opts, state) {
+    opts = opts || {};
+    const B = bot();
+    if (!state) freshPrefs();
+    const st = state || {
+      second: !!prefs.fieldSecond, count: normCount(prefs.botCount), mode: prefs.botMode === 'aggressive' ? 'aggressive' : 'smart',
+      pool: poolOf(prefs.botPool), same: false,
+    };
+    // "Jugar contra handtraps…" de la franja: ya viene con rival (2–3 al azar si no había)
+    if (!state && opts.wantBot && st.count === 0) st.count = '2-3';
+    const busy = hasPlays();
+    const canSame = !opts.deck && !!(S && S.start && d && S.start.deckId === d.id);
+    const seg = (id, key, items, cur) => '<div class="seg" id="' + id + '" role="group">' + items.map(([v, l]) => '<button type="button" data-' + key + '="' + v
+      + '" aria-pressed="' + (String(v) === String(cur)) + '">' + l + '</button>').join('') + '</div>';
+    const body = (busy ? '<p class="setup-warn">Se borra la partida actual: el campo, la cadena y el registro de jugadas.</p>' : '')
+      + (opts.deck ? '<p class="hint">Mazo: <b>' + esc(opts.deck.name) + '</b></p>' : '')
+      + '<div class="field"><span>Turno</span>' + seg('su-turn', 'second', [['0', 'Primero · 5 cartas'], ['1', 'Segundo · 6 cartas']], st.second ? '1' : '0')
+      + '<p class="hint su-note" id="su-turn-note"></p></div>'
+      + '<div class="field"><span>Rival</span>' + (B ? seg('su-count', 'count', [['0', 'Sin handtraps'], ['2', '2'], ['3', '3'], ['2-3', '2–3 al azar']], st.count)
+        : '<p class="hint">El rival con handtraps no está disponible.</p>') + '</div>'
+      + (B ? '<div class="field su-bot"><span>Modo</span>' + seg('su-mode', 'mode', [['smart', 'Inteligente'], ['aggressive', 'Agresivo']], st.mode)
+        + '<p class="hint su-note" id="su-mode-note"></p></div>'
+        + '<p class="su-pool su-bot"><span id="su-pool-sum"></span> <button type="button" class="link-btn" id="su-pool">Editar lista de handtraps…</button></p>' : '')
+      + (canSame ? '<label class="switch su-same"><input type="checkbox" id="su-same"' + (st.same ? ' checked' : '') + '><span>Repetir la mano inicial de este duelo</span></label>' : '');
+    openDialog(busy ? '¿Empezar un duelo nuevo?' : 'Nuevo duelo', '<div class="setup">' + body + '</div>', [
+      { label: 'Cancelar' },
+      { label: busy ? 'Nuevo duelo' : 'Empezar', kind: 'primary', action: () => startFromSetup(st, opts) },
+    ]);
+    const root = $('#modal-body');
+    const sync = () => {
+      $$('#su-turn [data-second]', root).forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.second === '1') === st.second)));
+      $('#su-turn-note', root).textContent = st.second ? 'Robas la 6ª carta en la Fase de Robo. Es el turno 2: hay Fase de Batalla.'
+        : 'Empiezas con 5 cartas: no robas y no hay Fase de Batalla.';
+      if (!B) return;
+      $$('#su-count [data-count]', root).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.count === String(st.count))));
+      $$('#su-mode [data-mode]', root).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === st.mode)));
+      $$('.su-bot', root).forEach((el) => { el.hidden = st.count === 0; });
+      $('#su-mode-note', root).textContent = st.mode === 'aggressive' ? 'Usa cada handtrap en el primer momento legal.'
+        : 'Guarda sus handtraps para el golpe más dañino (tus starters ★), sin dejar pasar todo tu turno.';
+      const copies = st.pool.reduce((s, x) => s + x.copies, 0);
+      $('#su-pool-sum', root).textContent = 'Lista: ' + nOf(st.pool.length, 'carta') + ' · ' + nOf(copies, 'copia') + '.';
+    };
+    root.querySelectorAll('[data-second], [data-count], [data-mode]').forEach((b) => b.addEventListener('click', () => {
+      if (b.dataset.second) st.second = b.dataset.second === '1';
+      if (b.dataset.count) st.count = normCount(b.dataset.count);
+      if (b.dataset.mode) st.mode = b.dataset.mode === 'aggressive' ? 'aggressive' : 'smart';
+      sync();
+    }));
+    const pb = $('#su-pool', root);
+    if (pb) pb.addEventListener('click', () => openPool(st, () => openSetup(opts, st)));
+    const same = $('#su-same', root);
+    if (same) same.addEventListener('change', () => { st.same = same.checked; });
+    sync();
+  }
+  function startFromSetup(st, opts) {
+    savePref({ fieldSecond: st.second, botCount: st.count, botMode: st.mode, botPool: st.pool });
+    if (opts.deck) d = opts.deck;
+    const bot0 = { enabled: st.count !== 0, count: st.count, mode: st.mode, pool: st.pool };
+    if (st.same && !opts.deck) restartSameHand({ second: st.second, bot: bot0 });
+    else newDuel(null, null, { second: st.second, bot: bot0 });
+    renderDeckSelect();
+  }
+  /** Lista de handtraps del rival: copias de 0 al máximo de la banlist TCG. */
+  function openPool(st, back) {
+    const H = HT();
+    const cur = new Map(st.pool.map((x) => [x.name, x.copies]));
+    const draft = Object.keys(H).filter((n) => idByName(n)).map((n) => {
+      const lim = Number(H[n] && H[n].limit);
+      const max = Math.max(0, Math.min(3, isNaN(lim) ? 3 : lim, db.banLimit(idByName(n))));
+      return { name: n, copies: Math.min(max, cur.get(n) || 0), max };
+    });
+    const total = () => draft.reduce((s, x) => s + x.copies, 0);
+    const row = (x, i) => '<div class="pool-row"><div class="pool-info"><b class="pool-name">' + esc(x.name) + '</b>'
+      + (H[x.name].what ? '<span class="hint">' + esc(H[x.name].what) + '</span>' : '')
+      + (x.max < 3 ? '<span class="pool-lim">' + (x.max === 2 ? 'Semilimitada: máx. 2' : x.max === 1 ? 'Limitada: máx. 1' : 'Prohibida') + '</span>' : '') + '</div>'
+      + '<div class="stepper"><button type="button" data-pool="' + i + '" data-d="-1" aria-label="Quitar una copia">−</button><b id="pool-n' + i + '">' + x.copies
+      + '</b><button type="button" data-pool="' + i + '" data-d="1" aria-label="Agregar una copia">+</button></div></div>';
+    const need = st.count === 3 || st.count === '2-3' ? 3 : 2; // las que puede robar el rival
+    const totalText = () => 'Total: ' + nOf(total(), 'copia') + (!total() ? ' · pon al menos 1 copia'
+      : total() < need ? ' · pon al menos ' + need + ' para que el rival pueda tener ' + need + ' handtraps' : '');
+    openDialog('Lista de handtraps', '<p class="hint">El rival roba sus handtraps al azar de esta lista (respeta la banlist TCG).</p>'
+      + '<div class="pool-list">' + draft.map(row).join('') + '</div><p class="pool-total" id="pool-total">' + esc(totalText()) + '</p>', [
+      { label: 'Restablecer', kind: 'link-btn', action: () => { st.pool = poolOf(null); openPool(st, back); } },
+      { label: 'Cancelar', action: back },
+      { label: 'Listo', kind: 'primary', action: () => {
+        const list = draft.filter((x) => x.copies > 0).map((x) => ({ name: x.name, copies: x.copies }));
+        st.pool = list.length ? list : poolOf(null);
+        back();
+      } },
+    ]);
+    const root = $('#modal-body');
+    // "Listo" sin copias no vale (antes volvía en silencio a la lista de fábrica)
+    const done = $$('#modal-foot button').find((b) => b.textContent === 'Listo');
+    const upd = () => {
+      $('#pool-total', root).textContent = totalText();
+      $('#pool-total', root).classList.toggle('bad', !total());
+      if (done) done.disabled = !total();
+    };
+    $$('[data-pool]', root).forEach((b) => b.addEventListener('click', () => {
+      const x = draft[Number(b.dataset.pool)];
+      x.copies = Math.max(0, Math.min(x.max, x.copies + Number(b.dataset.d)));
+      $('#pool-n' + b.dataset.pool, root).textContent = x.copies;
+      upd();
+    }));
+    upd();
+  }
+
+  /** Duelo nuevo con la misma mano inicial del actual (al pasar a ir primero, la 6ª carta, que fue el robo, vuelve al mazo).
+   * o: { second, keepBot (mismas handtraps del rival), bot (otra configuración del rival) }. */
+  function restartSameHand(o) {
+    const st = S && S.start;
+    const cfg = { second: !!o.second, bot: Object.assign({}, o.bot || (st && st.bot) || botConfig()) };
+    if (o.keepBot && S && S.opp) {
+      cfg.bot.forceHand = arr(S.opp.initialHand).slice();
+      if (typeof S.opp.seed === 'number') cfg.bot.seed = S.opp.seed;
+    }
+    if (!st || st.deckId !== d.id) { newDuel(null, null, cfg); return; }
+    let hand = st.hand.slice();
+    if (!cfg.second && st.second) hand = hand.slice(0, 5);
+    newDuel(hand, restOf(hand), cfg);
+  }
+
+  /* ---------- Intentos (js/attempts.js) ----------
+   * Un intento termina al pasar tu turno contra el rival o con "Terminar intento": se guarda y sale el resumen. */
+  function aCall(name, args, fallback) {
+    const A = window.YGO.attempts;
+    if (A && typeof A[name] === 'function') {
+      try { const v = A[name].apply(A, args); if (v !== undefined) return v; } catch (err) { console.warn('YGO.attempts.' + name + ' falló', err); }
+    }
+    return fallback;
+  }
+  const attemptTarget = () => (d ? arr(aCall('target', [d.id], [])) : []);
+  const attemptStats = () => (d ? aCall('stats', [d.id], null) : null);
+  /** Nombres de las cartas en tu campo (las de encima de cada zona). */
+  const boardNames = () => FIELD_ZONES.map((z) => S.zones[z][0]).filter(Boolean).map((x) => cardOf(x)).filter(Boolean).map((c) => c.name);
+
+  function endAttempt() {
+    if (!S || !d) return;
+    const sum = oppSummary();
+    const board = boardNames();
+    const target = attemptTarget();
+    const ev = aCall('evaluate', [target, board], null) || { pass: null, missing: [] };
+    const rec = {
+      deckName: d.name, second: !!(S.start && S.start.second), rival: oppOn(), mode: S.opp ? S.opp.mode : null,
+      count: S.start && S.start.bot && S.start.bot.enabled ? S.start.bot.count : 0, turn: S.turnState.turn,
+      hand: arr(S.start && S.start.hand).map(nameById), botHand: sum.initialHand.slice(), used: sum.used, unused: sum.unused, drew: sum.drew,
+      board, hasTarget: target.length > 0, auto: ev.pass, missing: arr(ev.missing),
+    };
+    let att = null;
+    if (recorded && recorded.duelId === S.duelId) {
+      // Ya se guardó este duelo: se actualiza (lo que respondiste a mano se respeta)
+      const old = aCall('get', [d.id, recorded.id], null);
+      rec.passed = old && old.manual ? old.passed : ev.pass;
+      att = aCall('update', [d.id, recorded.id, rec], null);
+    }
+    if (!att) {
+      rec.passed = ev.pass;
+      att = aCall('add', [d.id, rec], null);
+      if (att) recorded = { duelId: S.duelId, id: att.id };
+    }
+    render();
+    openSummary(att || rec);
+  }
+
+  const chipList = (names, cls) => names.map((n) => '<span class="sum-chip' + (cls ? ' ' + cls : '') + '">' + esc(n) + '</span>').join('');
+  function summaryHtml(att) {
+    const res = att.passed === true ? ['pass', 'Tu campo pasó'] : att.passed === false ? ['fail', 'Tu campo no pasó'] : ['unknown', 'Sin responder'];
+    let auto = att.hasTarget ? (att.auto ? 'Tienes todo tu campo objetivo.' : 'Te falta del campo objetivo: ' + listEs(arr(att.missing).map(q)) + '.')
+      : 'Sin campo objetivo: respóndelo tú.';
+    // Tu respuesta manda sobre la evaluación automática: se dice cuando no coinciden
+    if (att.hasTarget && att.manual && typeof att.auto === 'boolean' && typeof att.passed === 'boolean' && att.passed !== att.auto) {
+      auto = auto.slice(0, -1) + (att.passed ? ', pero marcaste que pasó igual.' : ', pero marcaste que no pasó.');
+    }
+    const usedNames = arr(att.used).map((u) => u.name);
+    const target = attemptTarget();
+    return '<div class="summary">'
+      + '<div class="sum-result ' + res[0] + '"><b>' + res[1] + '</b><span class="hint">' + esc(auto) + '</span>'
+      + '<div class="sum-ask"><span>¿Tu campo pasó?</span><div class="seg" role="group" aria-label="¿Tu campo pasó?">'
+      + '<button type="button" data-pass="1" aria-pressed="' + (att.passed === true) + '">Sí</button><button type="button" data-pass="0" aria-pressed="' + (att.passed === false) + '">No</button></div></div></div>'
+      + (att.rival
+        ? '<section><h3>Mano del rival</h3><div class="sum-chips">' + arr(att.botHand).map((n) => '<span class="sum-chip' + (usedNames.includes(n) ? ' used' : '') + '">' + esc(n) + '</span>').join('')
+          + (att.drew ? '<span class="hint">+ ' + att.drew + ' robada' + (att.drew > 1 ? 's' : '') + '</span>' : '') + '</div></section>'
+          + '<section><h3>Lo que usó</h3>' + (arr(att.used).length ? '<ul class="sum-used">' + att.used.map((u) => '<li><b>' + esc(u.name) + '</b>'
+            + (u.on ? ' en ' + esc(u.on) : '') + (u.turn ? ' · turno ' + esc(u.turn) : '')
+            + (u.unresolved ? ' <span class="sum-neg">No se resolvió</span>' : u.negated ? ' <span class="sum-neg">Negada</span>' : '') + '</li>').join('') + '</ul>'
+            : '<p class="hint">No usó ninguna handtrap.</p>') + '</section>'
+          + '<section><h3>Se guardó</h3>' + (arr(att.unused).length ? '<div class="sum-chips">' + chipList(att.unused) + '</div>' : '<p class="hint">Nada: usó todo lo que tenía.</p>') + '</section>'
+        : '<p class="hint">Este intento fue sin rival.</p>')
+      + '<section><h3>Tu campo al final</h3>' + (arr(att.board).length ? '<div class="sum-chips">' + arr(att.board).map((n) => '<span class="sum-chip' + (target.includes(n) ? ' goal' : '') + '">' + esc(n) + '</span>').join('') + '</div>'
+        : '<p class="hint">Tu campo quedó vacío.</p>')
+      + (S && boardNames().length ? '<button type="button" class="link-btn" data-sum="target">Guardar este campo como objetivo</button>' : '') + '</section>'
+      + '</div>';
+  }
+  function openSummary(att) {
+    const second = !!(S.start && S.start.second);
+    openDialog('Resumen del intento', summaryHtml(att), [
+      { label: 'Seguir jugando' },
+      { label: 'Misma mano, otras handtraps', action: () => restartSameHand({ second }) },
+      { label: 'Siguiente intento (mano nueva)', kind: 'primary', action: () => newDuel(null, null, { second, bot: S.start ? S.start.bot : undefined }) },
+    ]);
+    bindSummary(att);
+  }
+  function bindSummary(att) {
+    const root = $('#modal-body');
+    const redraw = (a) => { root.innerHTML = summaryHtml(a); bindSummary(a); render(); };
+    $$('[data-pass]', root).forEach((b) => b.addEventListener('click', () => {
+      const passed = b.dataset.pass === '1';
+      redraw((att.id && aCall('update', [d.id, att.id, { passed, manual: true }], null)) || Object.assign(att, { passed }));
+    }));
+    const t = $('[data-sum="target"]', root);
+    if (t) t.addEventListener('click', () => {
+      const board = boardNames();
+      aCall('setTarget', [d.id, board], null);
+      const ev = aCall('evaluate', [board, att.board], null) || { pass: null, missing: [] };
+      const patch = { hasTarget: true, auto: ev.pass, missing: arr(ev.missing) };
+      if (!att.manual) patch.passed = ev.pass;
+      toast('Campo objetivo guardado: ' + board.length + ' carta' + (board.length === 1 ? '' : 's'), 'ok');
+      redraw((att.id && aCall('update', [d.id, att.id, patch], null)) || Object.assign(att, patch));
+    });
+  }
+
+  /** Ventana "Intentos": % que pasa tu campo, por turno y por handtrap, y el campo objetivo del mazo. */
+  function statsHtml() {
+    const s = attemptStats() || { total: 0, traps: [] };
+    const pct = (x) => (x.pct === null || x.pct === undefined ? '—' : game.pct(x.pct));
+    const part = (label, x) => label + ': ' + (x && x.answered ? x.passed + ' de ' + x.answered + ' (' + pct(x) + ')' : '—');
+    const target = attemptTarget();
+    const recent = arr(aCall('list', [d.id], [])).slice(-8).reverse();
+    let html = '';
+    if (!s.total) {
+      html += '<p class="hint">Todavía no hay intentos con este mazo. Empieza un duelo contra handtraps (<b>Nuevo duelo</b> → Rival) y pasa tu turno: cada turno cuenta como un intento.</p>';
+    } else {
+      html += '<p class="st-big"><b>' + pct(s) + '</b> de las veces tu campo pasó · ' + s.passed + ' de ' + s.answered + ' intento' + (s.answered === 1 ? '' : 's') + '</p>'
+        + '<p class="hint">' + part('Yendo primero', s.first) + ' · ' + part('Yendo segundo', s.second) + '</p>'
+        + (s.answered < s.total ? '<p class="hint">' + (s.total - s.answered) + ' sin responder "¿Tu campo pasó?" (no cuentan para el %).</p>' : '')
+        + (s.worst ? '<p class="st-worst">La que más te cortó: <b>' + esc(s.worst.name) + '</b> (' + s.worst.stopped + ' ' + (s.worst.stopped === 1 ? 'vez' : 'veces') + ')</p>' : '');
+      if (s.traps.length) {
+        html += '<div class="st-table-wrap"><table class="st-table"><thead><tr><th>Handtrap</th><th class="num">La tuvo</th><th class="num">La usó</th><th class="num">Pasaste igual</th></tr></thead><tbody>'
+          + s.traps.map((t) => '<tr><td>' + esc(t.name) + '</td><td class="num">' + t.seen + '</td><td class="num">' + t.used + '</td><td class="num">'
+            + (t.usedAnswered ? t.usedPassed + ' <span class="st-pct">(' + game.pct(t.usedPassed / t.usedAnswered) + ')</span>' : '—') + '</td></tr>').join('') + '</tbody></table></div>';
+      }
+    }
+    html += '<section><h3>Campo objetivo</h3>' + (target.length
+      ? '<p class="hint">Pasas si al terminar tienes todas estas cartas en el campo.</p><div class="sum-chips">' + target.map((n, i) => '<span class="sum-chip goal">' + esc(n)
+        + '<button type="button" class="chip-x" data-tdel="' + i + '" aria-label="Quitar ' + esc(n) + '">×</button></span>').join('') + '</div>'
+      : '<p class="hint">Sin campo objetivo: al terminar cada intento respondes "¿Tu campo pasó?". Arma tu campo final y guárdalo aquí para que se evalúe solo.</p>')
+      + (S && boardNames().length ? '<button type="button" class="link-btn" data-st="save">Guardar el campo actual como objetivo</button>' : '') + '</section>';
+    if (recent.length) {
+      html += '<section><h3>Últimos intentos</h3><ol class="st-recent">' + recent.map((a) => '<li><span class="st-r ' + (a.passed === true ? 'pass' : a.passed === false ? 'fail' : '') + '">'
+        + (a.passed === true ? 'Pasó' : a.passed === false ? 'No pasó' : '—') + '</span> ' + (a.second ? 'Segundo' : 'Primero')
+        + (a.rival ? ' · ' + (arr(a.used).length ? 'usó ' + esc(arr(a.used).map((u) => shortName(u.name)).join(', ')) : 'no usó nada') : ' · sin rival') + '</li>').join('') + '</ol></section>';
+    }
+    return '<div class="stats">' + html + '</div>';
+  }
+  function openStats() {
+    if (!d) return;
+    openDialog('Intentos · ' + d.name, statsHtml(), [
+      { label: 'Borrar estadísticas', kind: 'ghost-danger', action: () => openDialog('¿Borrar estadísticas?', '<p class="hint">Se borran los intentos de «' + esc(d.name) + '». El campo objetivo se queda.</p>', [
+        { label: 'Cancelar', action: openStats },
+        { label: 'Borrar', kind: 'danger', action: () => { aCall('clear', [d.id], null); recorded = null; render(); openStats(); } },
+      ]) },
+      { label: 'Cerrar', kind: 'primary' },
+    ]);
+    bindStats();
+  }
+  function bindStats() {
+    const root = $('#modal-body');
+    const redraw = () => { root.innerHTML = statsHtml(); bindStats(); render(); };
+    $$('[data-tdel]', root).forEach((b) => b.addEventListener('click', () => {
+      const t = attemptTarget();
+      t.splice(Number(b.dataset.tdel), 1);
+      aCall('setTarget', [d.id, t], null);
+      redraw();
+    }));
+    const sv = $('[data-st="save"]', root);
+    if (sv) sv.addEventListener('click', () => { aCall('setTarget', [d.id, boardNames()], null); toast('Campo objetivo guardado', 'ok'); redraw(); });
   }
 
   /* ---------- Arrastrar ---------- */
@@ -1929,21 +2757,33 @@
   /* ---------- Eventos ---------- */
   function bind() {
     $('#fd-deck').addEventListener('change', (e) => {
-      const next = e.target.value;
+      const next = decks().find((x) => x.id === e.target.value);
       // Mientras no confirme, el selector sigue mostrando el mazo de la partida actual
       if (d) e.target.value = d.id;
-      confirmRestart(() => {
-        d = decks().find((x) => x.id === next) || d;
-        $('#fd-deck').value = d.id;
-        newDuel();
-      });
+      if (next) openSetup({ deck: next });
     });
-    $$('#fd-size button').forEach((b) => b.addEventListener('click', () => {
-      prefs.handSize = Number(b.dataset.n);
-      store.savePrefs(Object.assign(store.prefs(), { handSize: prefs.handSize }));
-      render();
+    // Primero / Segundo: el mismo duelo con la misma mano inicial (y las mismas handtraps), cambiando el turno
+    $$('#fd-order button').forEach((b) => b.addEventListener('click', () => {
+      const second = b.dataset.order === 'second';
+      if (!S || !!(S.start && S.start.second) === second) return;
+      confirmRestart(() => {
+        savePref({ fieldSecond: second });
+        restartSameHand({ second, keepBot: true });
+        toast(second ? 'Vas segundo: robaste 1 carta en la Fase de Robo' : 'Vas primero: 5 cartas, sin robo ni Fase de Batalla', 'ok');
+      });
     }));
-    $('#fd-new').addEventListener('click', () => confirmRestart(() => newDuel()));
+    $('#fd-new').addEventListener('click', () => openSetup());
+    $('#fd-end').addEventListener('click', () => endAttempt());
+    // Franja del rival: ver su mano, sus cartas, intentos y la ventana de Nuevo duelo
+    $('#fd-opp').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-opp], [data-oppcard]');
+      if (!b) return;
+      if (b.dataset.oppcard) { showCard(Number(b.dataset.oppcard)); return; }
+      const k = b.dataset.opp;
+      if (k === 'reveal') { revealed[S.duelId] = !revealed[S.duelId]; renderOpp(); }
+      else if (k === 'setup') openSetup({ wantBot: true });
+      else if (k === 'stats') openStats();
+    });
     $('#fd-draw').addEventListener('click', () => draw(1));
     $('#fd-shuffle').addEventListener('click', () => { snapshot(); game.shuffle(S.deck); toast('Mazo barajado'); render(); });
     $('#fd-search').addEventListener('click', () => openPile('deck'));
@@ -1993,6 +2833,8 @@
 
     // Cadena (panel lateral y franja del móvil)
     [$('#fd-chain'), $('#fd-chain-strip')].forEach((el) => el.addEventListener('click', (e) => {
+      const nb = e.target.closest('[data-neg]');
+      if (nb) { toggleNegated(Number(nb.dataset.neg)); return; }
       const b = e.target.closest('[data-chain]');
       if (!b) return;
       if (b.dataset.chain === 'resolve') resolveChain();
@@ -2068,12 +2910,17 @@
       newDuel();
     } else render();
     renderDeckSelect();
+    // La respuesta del rival al empezar (p. ej. desde la prueba de mano) se muestra ya en el campo
+    if (oppQueued) showOpp(oppQueued);
   }
 
-  /** Empieza un duelo con una mano concreta (desde la prueba de mano). */
-  function load(deckObj, handIds, restIds) {
+  /** Empieza un duelo con una mano concreta (desde la prueba de mano).
+   * opts: { second (la 6ª carta de la mano cuenta como robada), bot: { enabled, count, mode, pool, seed, forceHand } }.
+   * Sin opts.bot, el rival es el de las preferencias (ventana Nuevo duelo). */
+  function load(deckObj, handIds, restIds, opts) {
     d = deckObj;
-    newDuel(handIds, restIds);
+    opts = Object.assign({ second: false }, opts);
+    newDuel(handIds, restIds, opts);
     renderDeckSelect();
   }
 

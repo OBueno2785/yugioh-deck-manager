@@ -676,3 +676,143 @@ body:not(.fd-selected) .fd-log .log-scroll { max-height: 56vh; }
     border-width: 1px; font: 700 9.5px/11px var(--data);
   }
 }
+
+/* ---------- Rival con handtraps, cadena del rival, intentos y Nuevo duelo ----------
+   Franja del rival sobre el tablero (mano oculta, lo que usó, bloqueos), eslabones del rival en rojo con
+   la marca "Negado", fichas, ventana "El rival responde", Nuevo duelo, lista de handtraps, resumen e intentos. */
+:root { --opp: #ff8a7d; --opp-bg: rgba(227, 89, 78, .1); --opp-line: rgba(227, 89, 78, .55); }
+.fd-opp {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 7px 16px;
+  border-bottom: 1px solid var(--line); background: linear-gradient(90deg, var(--opp-bg), transparent 70%);
+}
+.fd-opp:empty { display: none; }
+.opp-tag { font: 700 13px var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--opp); }
+.opp-mode { padding: 0 7px; border-radius: 999px; border: 1px solid var(--opp-line); color: #ffc2bb; font: 600 12px/18px var(--data); letter-spacing: .04em; }
+.opp-off { color: var(--muted); font-size: 13px; }
+.opp-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.opp-label { font: 600 11px var(--data); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+.opp-backs { display: inline-flex; gap: 3px; }
+.opp-backs i {
+  width: 13px; height: 19px; border-radius: 2px; border: 1px solid #3b2a1a;
+  background: radial-gradient(circle at center, #c9772f 0 18%, #5a2c13 19% 30%, #2b1b10 31%);
+}
+.opp-n { font: 700 14px var(--data); color: var(--fg); }
+.opp-none { color: var(--muted); font-size: 12.5px; }
+button.opp-btn { padding: 3px 9px; font-size: 12.5px; line-height: 1.3; }
+.opp-btn[aria-pressed="true"] { border-color: var(--opp-line); color: #ffc2bb; }
+.opp-stats { margin-left: auto; }
+button.opp-chip, .opp-chip {
+  padding: 1px 8px; border-radius: 999px; font: 600 12.5px/18px var(--data); letter-spacing: .02em;
+  border: 1px solid var(--opp-line); background: var(--opp-bg); color: #ffd3ce; white-space: nowrap;
+}
+button.opp-chip:hover:not(:disabled) { background: rgba(227, 89, 78, .2); border-color: var(--opp); }
+.opp-chip.used { background: transparent; color: var(--opp); }
+.opp-chip.neg { text-decoration: line-through; opacity: .7; }
+.opp-chip.blank { border-style: dashed; background: transparent; color: var(--muted); }
+.opp-lock { padding: 1px 8px; border-radius: 4px; border: 1px solid var(--warn); color: #ffd59a; background: rgba(240, 163, 58, .1); font: 600 12.5px/18px var(--data); }
+
+/* Eslabones: el del rival en rojo; "Negado" marca que un efecto lo negó */
+.chain-list li { grid-template-columns: auto minmax(0, 1fr) auto; }
+.chain-list li.opp { border-color: var(--opp-line); background: var(--opp-bg); }
+.chain-list li.opp .cl { background: var(--danger); color: #fff; }
+.cl-who { font: 700 10.5px/14px var(--data); letter-spacing: .08em; text-transform: uppercase; color: var(--opp); }
+.chain-list li.negated > .cl-body > b { text-decoration: line-through; opacity: .75; }
+.cl-neg { align-self: flex-start; margin-top: 2px; padding: 0 6px; border-radius: 3px; background: var(--danger); color: #fff; font: 700 10.5px/16px var(--data); letter-spacing: .06em; text-transform: uppercase; }
+.cl-hint { color: #ffb3ab; font-size: 12px; }
+/* Cadena en pausa: lo ya resuelto se ve apagado */
+.chain-list li.done { opacity: .7; }
+.cl-done { align-self: flex-start; margin-top: 2px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); font: 700 10.5px/16px var(--data); letter-spacing: .06em; text-transform: uppercase; }
+.chain-list li.done .cl-hint { color: var(--accent); }
+button.cl-negbtn { align-self: start; padding: 2px 7px; font-size: 11.5px; line-height: 1.3; color: var(--muted); }
+button.cl-negbtn[aria-pressed="true"] { color: var(--fg); border-color: var(--danger); }
+.log-e.k-opp { border-left-color: var(--danger); color: #ffd3ce; }
+
+/* Tablero: monstruo con efectos negados, carta apuntada por el rival y fichas */
+.neg-badge {
+  position: absolute; left: 3px; bottom: 3px; z-index: 3; padding: 0 4px; border-radius: 3px; pointer-events: none;
+  background: var(--danger); color: #fff; font: 700 10.5px/15px var(--data); letter-spacing: .04em; text-transform: uppercase; box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+}
+.opp-hit {
+  position: absolute; top: -5px; right: -5px; z-index: 4; width: 18px; height: 18px; border-radius: 50%; pointer-events: none;
+  background: var(--danger); color: #fff; font: 700 12px/18px var(--body); text-align: center; box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+}
+.f-token { --fc: #6b7385; --ft: #f2f4f8; background: repeating-linear-gradient(135deg, #6b7385 0 6px, #626a7b 6px 12px); }
+
+/* Ventana "El rival responde" */
+.modal-box:has(.opp-resp) { border-color: var(--opp-line); }
+.modal-box:has(.opp-resp) h2 { color: var(--opp); }
+.opp-resp { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 12px; align-items: start; }
+.opp-resp-card .card { width: 76px; }
+.opp-resp-text { display: flex; flex-direction: column; gap: 6px; }
+.opp-resp-line { font-weight: 600; line-height: 1.4; }
+.opp-resp-why { color: #ffd3ce; font-size: 13.5px; }
+
+/* Nuevo duelo y lista de handtraps */
+.setup { display: flex; flex-direction: column; gap: 14px; }
+.setup .seg { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
+.setup .seg button { padding: 7px 11px; }
+.setup-warn { padding: 7px 10px; border-radius: var(--r); border: 1px solid var(--warn); color: #ffd59a; background: rgba(240, 163, 58, .08); font-size: 13px; }
+.su-note { font-size: 12.5px; }
+.su-pool { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--muted); font-size: 13px; }
+.su-same { font-size: 13.5px; }
+.pool-list { display: flex; flex-direction: column; gap: 6px; }
+.pool-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #0c1526; }
+.pool-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; line-height: 1.35; }
+.pool-name { font-size: 13.5px; }
+.pool-lim { color: var(--warn); font: 600 12px var(--data); letter-spacing: .03em; }
+.pool-total { font: 600 14px var(--data); color: var(--accent); }
+.pool-total.bad { color: #ffb3ab; }
+
+/* Turno: "Terminar intento" */
+button.end-btn { border-color: var(--opp-line); }
+button.end-btn:hover:not(:disabled) { border-color: var(--opp); }
+
+/* Resumen del intento e intentos */
+.modal-box:has(.summary), .modal-box:has(.stats) { width: min(600px, 100%); }
+.summary, .stats { display: flex; flex-direction: column; gap: 12px; }
+.summary h3, .stats h3 { margin: 0 0 6px; font: 600 11.5px var(--data); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.sum-result { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--raised); }
+.sum-result > b { font: 700 17px var(--display); letter-spacing: .03em; }
+.sum-result.pass { border-color: var(--ok); }
+.sum-result.pass > b { color: var(--ok); }
+.sum-result.fail { border-color: var(--danger); }
+.sum-result.fail > b { color: #ffb3ab; }
+.sum-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; color: var(--muted); }
+.sum-ask .seg button { min-width: 52px; }
+.sum-chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.sum-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); background: #0c1526; font-size: 12.5px; line-height: 20px; }
+.sum-chip.used { border-color: var(--opp-line); color: #ffd3ce; background: var(--opp-bg); }
+.sum-chip.goal { border-color: rgba(76, 197, 140, .7); color: #aef0cf; }
+.sum-used { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.sum-neg { padding: 0 5px; border-radius: 3px; background: var(--ok); color: #05261a; font: 700 10.5px/16px var(--data); letter-spacing: .05em; text-transform: uppercase; }
+button.chip-x { padding: 0; width: 18px; height: 18px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; }
+button.chip-x:hover:not(:disabled) { background: rgba(227, 89, 78, .2); color: #ffb3ab; }
+.st-big { font-size: 14px; }
+.st-big b { font: 700 24px var(--data); color: var(--accent); margin-right: 4px; }
+.st-worst { color: #ffd3ce; font-size: 13.5px; }
+.st-table-wrap { overflow-x: auto; }
+.st-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.st-table th { font: 600 11px var(--data); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.st-table td { padding: 4px 6px; border-bottom: 1px solid rgba(36, 54, 90, .6); }
+.st-table .num { text-align: right; white-space: nowrap; }
+.st-recent { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
+.st-r { font-weight: 600; color: var(--fg); }
+.st-r.pass { color: var(--ok); }
+.st-r.fail { color: #ffb3ab; }
+
+@media (max-width: 599px) {
+  .fd-opp { padding: 6px 12px; gap: 5px 8px; }
+  .opp-mode { padding: 0 5px; font-size: 11px; line-height: 16px; }
+  .opp-stats { margin-left: 0; }
+  /* Con "Terminar intento" los cuatro botones del turno van en dos filas */
+  .turn-btns:has(.end-btn:not([hidden])) { display: grid; grid-template-columns: 1fr 1fr; }
+  .opp-resp { grid-template-columns: 60px minmax(0, 1fr); }
+  .opp-resp-card .card { width: 60px; }
+  .setup .seg button { padding: 7px 9px; }
+  .pool-row { padding: 6px 8px; }
+  .modal-foot button { white-space: normal; }
+  /* Tabla de "Intentos": cabe sin desplazarse (el % va debajo del número) */
+  .st-table th { letter-spacing: 0; white-space: normal; padding: 4px; }
+  .st-table td { padding: 4px; }
+  .st-table .st-pct { display: block; }
+}

@@ -171,7 +171,8 @@
     $('#ht-draw1').addEventListener('click', draw1);
     $('#ht-clear').addEventListener('click', () => { resetDeck(); render(); });
     $('#ht-tofield').addEventListener('click', () => {
-      window.YGO.field.load(d, hand.slice(), rest.slice());
+      // Con 6 cartas vas segundo: la 6ª cuenta como la robada en la Fase de Robo (turno 2)
+      window.YGO.field.load(d, hand.slice(), rest.slice(), { second: hand.length === 6 });
       window.YGO.go('campo');
     });
     $('#ht-hand').addEventListener('click', (e) => {

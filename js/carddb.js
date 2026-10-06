@@ -126,6 +126,19 @@
       }
       return n;
     },
+    /** Cartas que solo existen en el campo (p. ej. "Primal Being Token" de Nibiru): db.get las encuentra,
+     * pero no salen en búsquedas ni se guardan en localStorage. Devuelve cuántas eran nuevas. */
+    addVirtual(rows) {
+      let n = 0;
+      for (const r of rows || []) {
+        if (byId.has(r[0])) continue;
+        const c = fromRow(r);
+        c.virtual = true;
+        byId.set(c.id, c);
+        n++;
+      }
+      return n;
+    },
     has: (id) => byId.has(Number(id)) || byId.has(Number(aliases[id])),
 
     /** Busca una carta por su nombre exacto (sin distinguir mayúsculas, tildes ni comillas tipográficas). */

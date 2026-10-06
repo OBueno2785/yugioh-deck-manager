@@ -73,10 +73,13 @@
   const RITUAL_ATK = /\b(?:total|combined) ATK\b[^.]*\bRitual\b|\bRitual\b[^.]*\b(?:total|combined) ATK\b/i;
 
   /* ---------- Estado del turno ---------- */
-  function newTurnState() {
+  function newTurnState(opts) {
     // turn/mine/phase/normalSummons/opt: contrato con field.js; el resto lo usa solo este módulo
     // acts: efectos activados este turno ({ id, effectIndex, monster }), para efectos que dan permisos o límites ese turno
-    return { turn: 1, mine: true, phase: 'main1', normalSummons: 0, opt: {}, pendulumSummons: 0, duel: {}, locks: [], specials: [], acts: [] };
+    // opts.second: vas segundo → es tu turno 2 (con Fase de Batalla); opts.phase: fase inicial
+    opts = opts || {};
+    const phase = PHASE_KEYS.includes(opts.phase) ? opts.phase : 'main1';
+    return { turn: opts.second ? 2 : 1, mine: true, phase, normalSummons: 0, opt: {}, pendulumSummons: 0, duel: {}, locks: [], specials: [], acts: [] };
   }
   /** Lectura tolerante (estados viejos sin turnState). No modifica S. */
   function tsOf(S) {
@@ -168,6 +171,10 @@
   const properOf = (inst) => (inst && (inst.properSummon || inst.summonMethod)) || null;
   const hasLevel = (c) => db.isMonster(c) && !(c.type & (T.XYZ | T.LINK));
   const levelOf = (c, inst) => (inst && typeof inst.level === 'number' ? inst.level : c.lv);
+  /** inst.negated = { turn, by }: field.js lo pone cuando el rival niega sus efectos (vale hasta el final de ese turno). */
+  const negatedNow = (inst, t) => (inst && inst.negated && Number(inst.negated.turn) === t.turn ? inst.negated : null);
+  /** Token (inst.token = { name, atk, def, level, attribute, race }, p. ej. el de Nibiru) o carta de tipo Token. */
+  const isToken = (x) => !!(x && ((x.inst && x.inst.token) || (x.c && x.c.type & T.TOKEN)));
 
   /* ---------- Texto ---------- */
   function topIndex(s, ch) {
@@ -255,7 +262,7 @@
       if (take(/^non-Tuners?\b/)) { d.tests.push((x) => !(x.c.type & T.TUNER)); d.labels.push('no Cantante'); continue; }
       if (take(/^non-Link\b/)) { d.tests.push((x) => !(x.c.type & T.LINK)); d.labels.push('no Link'); continue; }
       if (take(/^non-Effect\b/)) { d.tests.push((x) => !(x.c.type & T.EFFECT)); d.labels.push('sin Efecto'); continue; }
-      if (take(/^non-Token\b/)) continue;
+      if (take(/^non-Token\b/)) { d.tests.push((x) => !isToken(x)); continue; }
       if ((m = take(new RegExp('^non-(' + ATTR_ITEM + ')\\b')))) {
         const bit = ATTRS.find((a) => a[0] === m[1])[1];
         d.tests.push((x) => x.c.attribute !== bit);
@@ -338,7 +345,7 @@
         if (r) { fn(r); s = s.slice(0, r.index).trim(); changed = true; }
         return !!r;
       };
-      if (cut(/,? except Tokens$/, () => {})) continue;
+      if (cut(/,? except Tokens$/, () => { group.noTokens = true; })) continue;
       if (cut(/,? including (?:a|an|at least (\d+)) (.+)$/, (r) => { group.including = parseDesc(r[2]); group.includingMin = r[1] ? +r[1] : 1; })) continue;
       if (cut(/,? with different names$/, () => { group.diffNames = true; })) continue;
       if (cut(/,? with the same Attribute but different Types$/, () => { group.same = ['attribute']; group.diff = ['race']; })) continue;
@@ -360,6 +367,7 @@
     for (const f of g.diff || []) if (new Set(xs.map((x) => x.c[f])).size !== xs.length) return false;
     for (const f of g.same || []) if (new Set(xs.map((x) => x.c[f])).size > 1) return false;
     if (g.except && xs.some((x) => isArch(x.c, g.except))) return false;
+    if (g.noTokens && xs.some(isToken)) return false;
     if (g.including && xs.filter((x) => fits(g.including, x)).length < g.includingMin) return false;
     return true;
   }
@@ -1098,6 +1106,8 @@
       if (!xs.length) err(v, 'Elige los materiales.');
       else {
         needFieldFaceUp(v, xs, word, !!req.source);
+        // Los Tokens no pueden ser material Xyz (sí de Sincronía, Link o Fusión)
+        if (method === 'xyz') for (const x of xs) if (isToken(x)) err(v, q((x.inst.token && x.inst.token.name) || x.c.name) + ' es un Token: los Tokens no pueden ser material Xyz.');
         if (method === 'synchro') synchroChecks(v, c, xs);
         else if (method === 'xyz') xyzChecks(v, c, xs, req);
         else linkChecks(v, c, xs);
@@ -1417,7 +1427,8 @@
 
   /** Bloqueos de invocación activos y "solo puedes invocar X una vez por turno". */
   function specialLimits(S, req, v, t, c, a, fromExtra, method) {
-    const locks = t.locks.map((l) => ({ lock: l, source: l.source }));
+    // Los bloqueos con kind (p. ej. 'noDeckAdd' de Droll) no son de invocación
+    const locks = t.locks.filter((l) => l && !l.kind).map((l) => ({ lock: l, source: l.source }));
     for (const z of [...MON_ZONES, ...ST, 'fz']) {
       const inst = topOf(S, z);
       if (!inst || inst.faceDown || inst.uid === req.uid) continue;
@@ -1607,6 +1618,11 @@
       else if (e.kind === 'trigger') warn(v, 'La carta está boca abajo; revisa que el efecto se pueda usar así.');
       else err(v, 'La carta está boca abajo: primero actívala.');
       return;
+    }
+    // Monstruo con los efectos negados este turno (Effect Veiler, Infinite Impermanence del rival)
+    const neg = negatedNow(loc.inst, t);
+    if (place === 'field' && MON_ZONES.includes(loc.zone) && db.isMonster(c) && neg) {
+      err(v, 'Los efectos de ' + q(c.name) + ' están negados este turno' + (neg.by ? ' (por ' + q(neg.by) + ')' : '') + '.');
     }
     if (place && !where.includes(place)) {
       warn(v, 'Este efecto se usa con la carta en ' + where.map((w) => AREA_NAMES[w] || w).join(' o ') + ', y está en ' + (AREA_NAMES[place] || place) + '.');
@@ -1800,11 +1816,36 @@
     return entry(S, 'set', 'Coloca ' + q(nameOf(S, uid)), v, { uid });
   }
 
+  /* ---------- Movimientos manuales y bloqueos del rival ---------- */
+  /** Movimiento manual (añadir del Mazo a la mano, etc.). Los robos no pasan por aquí (Droll no los impide). */
+  function checkMove(S, uid, dest, opts) {
+    const v = verdict();
+    try {
+      const loc = locate(S, uid);
+      if (!loc) { err(v, 'No encuentro esa carta.'); return done(v); }
+      const t = tsOf(S);
+      if (dest === 'hand' && loc.area === 'deck' && !(opts && opts.draw)) {
+        for (const l of t.locks) {
+          if (l && l.kind === 'noDeckAdd') err(v, 'Por ' + q(l.source || 'Droll & Lock Bird') + ', este turno no se pueden añadir cartas del Mazo a la mano.');
+        }
+      }
+    } catch (e) { warn(v, 'No pude revisar este movimiento.'); }
+    return done(v);
+  }
+  /** Agrega un bloqueo de este turno: { kind: 'noDeckAdd', source, text }. Se borra al pasar de turno. */
+  function addLock(S, lock) {
+    const t = ensureTS(S);
+    if (lock && typeof lock === 'object' && !t.locks.some((l) => l && l.kind === lock.kind && l.source === lock.source)) {
+      t.locks.push(Object.assign({}, lock));
+    }
+    return t;
+  }
+
   YGO.rules = {
     PHASES, ZONE_NAMES, METHOD_LABELS, KIND_LABELS,
     newTurnState, nextPhase, setPhase, passTurn, phaseName, turnLabel,
     effectsOf, parseMaterials, procedureOf, linkedZones, legalZones, locate,
-    checkSummon, checkActivation, checkPlacement, checkPosition, checkSet,
-    commitSummon, commitActivation, commitPosition, commitSet,
+    checkSummon, checkActivation, checkPlacement, checkPosition, checkSet, checkMove,
+    commitSummon, commitActivation, commitPosition, commitSet, addLock,
   };
 })();

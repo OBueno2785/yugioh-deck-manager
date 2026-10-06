@@ -159,8 +159,8 @@
       <div class="toolrow">
         <label class="sr" for="fd-deck">Mazo</label>
         <select id="fd-deck" class="deck-select"></select>
-        <div id="fd-size" class="seg" role="group" aria-label="Cartas iniciales">
-          <button type="button" data-n="5">5</button><button type="button" data-n="6">6</button>
+        <div id="fd-order" class="seg" role="group" aria-label="Turno: primero o segundo">
+          <button type="button" data-order="first" title="5 cartas, sin robo ni Fase de Batalla">Primero</button><button type="button" data-order="second" title="Robas la 6ª carta en la Fase de Robo">Segundo</button>
         </div>
         <button id="fd-new" type="button" class="primary">Nuevo duelo</button>
         <button id="fd-draw" type="button" title="Atajo: D">Robar</button>
@@ -175,11 +175,13 @@
         <div class="turn-btns">
           <button id="fd-next-phase" type="button">Siguiente fase</button>
           <button id="fd-pass" type="button">Pasar turno</button>
+          <button id="fd-end" type="button" class="end-btn" title="Guarda el intento y muestra el resumen" hidden>Terminar intento</button>
           <button id="fd-log-btn" type="button" class="log-btn">Registro (0)</button>
         </div>
         <p id="fd-ns" class="ns-state"></p>
         <label class="switch"><input id="fd-strict" type="checkbox"><span>Bloquear jugadas ilegales</span></label>
       </div>
+      <div id="fd-opp" class="fd-opp" role="group" aria-label="Rival"></div>
       <div id="fd-pending" class="pending" hidden>
         <div class="pending-main"><span id="fd-pending-text"></span><div id="fd-pick" class="pick-info" hidden></div></div>
         <div class="pending-btns"><button id="fd-confirm" type="button" class="primary" hidden>Confirmar</button><button id="fd-cancel" type="button">Cancelar</button></div>
@@ -225,8 +227,10 @@
 <script src="js/online.js"></script>
 <script src="js/game.js"></script>
 <script src="js/rules.js"></script>
+<script src="js/bot.js"></script>
 <script src="js/deckbuilder.js"></script>
 <script src="js/handtest.js"></script>
+<script src="js/attempts.js"></script>
 <script src="js/field.js"></script>
 <script src="js/app.js"></script>
 </body>
