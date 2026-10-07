@@ -141,6 +141,7 @@
   const QUOTE_RE = new RegExp('^' + listOf('"[^"]+"') + '(?=[\\s,]|$)');
   const KIND_RE = new RegExp('^' + listOf(KIND_ITEM + 's?') + '(?=[\\s,]|$)');
   const NON_ATTR_RE = new RegExp('^non-(' + ATTR_ITEM + ')\\b');
+  const NON_RACE_RE = new RegExp('^non-(' + RACES_EN.map((r) => r[0]).join('|') + ')(?:-Type)?(?![\\w-])');
   const range = (n, how) => (/lower|less/.test(how) ? { max: n } : { min: n });
 
   /** Lee un filtro sin la cantidad ("other "Elfnote" monster, except "Elfnote Lucina"") → { ok, filter } | { ok: false, rest } */
@@ -209,6 +210,7 @@
       if (pre(/^non-Tokens?\b/, () => add('notKinds', 'Token'))) continue;
       if (pre(/^non-(Effect|Link|Pendulum|Xyz|Fusion|Synchro|Ritual)\b/, (m) => add('notKinds', m[1]))) continue;
       if (pre(NON_ATTR_RE, (m) => add('notAttr', m[1]))) continue;
+      if (pre(NON_RACE_RE, (m) => add('notRace', m[1]))) continue;
       if (pre(/^non-"([^"]+)"/, (m) => add('notArch', m[1]))) continue;
       if (pre(/^Level (\d+) or (lower|higher|less|more)\b/, (m) => { f.level = range(+m[1], m[2]); })) continue;
       if (pre(/^Level (\d+) or (\d+)\b/, (m) => { f.level = { in: [+m[1], +m[2]] }; })) continue;
@@ -245,7 +247,7 @@
     if (s) return { ok: false, rest: s };
     if (!f.type) {
       if (f.names) f.type = 'card';
-      else if (f.kinds || f.kindsAll || f.level || f.rank || f.link || f.attr || f.race || f.notKinds || f.atk || f.def) f.type = 'monster';
+      else if (f.kinds || f.kindsAll || f.level || f.rank || f.link || f.attr || f.race || f.notRace || f.notKinds || f.atk || f.def) f.type = 'monster';
       else return { ok: false, rest: '(sin sustantivo)' };
     }
     if (f.sub && f.type === 'monster') return { ok: false, rest: f.sub.join(' ') };
@@ -299,6 +301,7 @@
     if (f.attr && !(mon && f.attr.some((a) => c.attribute === bitOf(ATTRS, a)))) return false;
     if (f.notAttr && mon && f.notAttr.some((a) => c.attribute === bitOf(ATTRS, a))) return false;
     if (f.race && !(mon && f.race.some((r) => c.race === bitOf(RACES_EN, r)))) return false;
+    if (f.notRace && mon && f.notRace.some((r) => c.race === bitOf(RACES_EN, r))) return false;
     if (f.arch && !f.arch.some((n) => isArch(c, n))) return false;
     if (f.notArch && f.notArch.some((n) => isArch(c, n))) return false;
     if (f.names && !f.names.some((n) => isNamed(c, n))) return false;
@@ -471,7 +474,7 @@
   const manual = (text, why) => ({ verb: 'manual', text, why });
   const note = (kind, text) => ({ kind, text });
   const LOCK = /\b(?:cannot|can't|can only)\b|^neither player can\b|^for the rest of (?:this|the) turn\b|^until the end of\b|^this turn,/i;
-  const STAT = /\b(?:gains?|loses?) (?:\d+ )?(?:ATK|DEF)\b|\b(?:gains?|loses?) (?:ATK|DEF) equal\b|\b(?:ATK|DEF)(?:\/DEF| and DEF)? (?:becomes?|is halved|is doubled|become)\b|\b(?:original|current) (?:ATK|DEF) becomes?\b|\bATK (?:becomes|become) double\b/i;
+  const STAT = /\b(?:gains?|loses?) (?:\d+ )?(?:ATK|DEF)\b|\b(?:gains?|loses?) (?:ATK|DEF) equal\b|\b(?:ATK|DEF)(?:\/DEF| and DEF)? (?:becomes?|is halved|is doubled|become)\b|\b(?:original|current) (?:ATK|DEF) becomes?\b|\bATK (?:becomes|become) double\b|\b(?:original |current )?(?:ATK|DEF)(?:'s)? of\b.*\bbecomes? (?:doubled|tripled|halved)\b|\bcan make (?:up to )?(?:\d+|two|three|a second|a third) attacks?\b/i;
   const DELAYED = /\bduring (?:the|this|your|each|the next) (?:next )?(?:End|Standby) Phase\b|\b(?:2nd|next) Standby Phase\b|\bduring the End Phase of\b|\bat the end of the Battle Phase\b/i;
   const OPP_HEAD = /^(?:negate\b|take control\b|look at (?:your opponent's|the top (?:\d+ )?cards? of your opponent's)|your opponent\b|the opponent\b|change control\b)/i;
   // Comienzo de lo que sigue a una condición "if ..., <esto>"
@@ -906,7 +909,9 @@
 
   /** Lee costo + resolución en el plan (o en una opción). */
   function readInto(target, costText, resText, ctx) {
-    for (const t of costClauses(costText)) {
+    for (let t of costClauses(costText)) {
+      // "target 1 ... and activate 1 of these effects": el objetivo se elige igual; solo se quita la elección
+      t = t.replace(/,?\s+and (?:activate|apply|choose) (?:1|one) of (?:these|the following) effects\b.*$/i, '');
       if (OPTIONS.test(t) || /^(?:you can )?activate this effect(?: once per (?:turn|battle|Chain))?$/i.test(clean(t))) continue;
       const x = parseClause(t, Object.assign({}, ctx, { cost: true, prev: null, targets: ctx.allTargets() }));
       // Un costo que no sé pagar nunca se salta: solo las aclaraciones (reglas) quedan como nota
@@ -1091,6 +1096,7 @@
     if (f.arch) out.push(f.arch.map(q).join(' o '));
     if (f.notArch) out.push((plural ? 'que no sean ' : 'que no sea ') + f.notArch.map(q).join(' ni '));
     if (f.names) out.push(f.names.map(q).join(' o '));
+    if (f.notRace) out.push((plural ? 'que no sean ' : 'que no sea ') + f.notRace.map(raceEs).join(' ni '));
     if (f.position) out.push(f.position === 'def' ? 'en Defensa' : 'en Ataque');
     if (f.faceUp) out.push('boca arriba');
     if (f.faceDown) out.push('boca abajo');

@@ -213,6 +213,14 @@
   const archCache = new Map();
   const chunks = (code) => {
     const out = [];
+    if (typeof code === 'string' && typeof BigInt === 'function') {
+      // Setcode de más de 53 bits (cartas de 4 arquetipos): viene como texto para no perder precisión
+      const Z = BigInt(0), MASK = BigInt(0xffff), SHIFT = BigInt(16);
+      let b;
+      try { b = BigInt(code); } catch (e) { b = Z; }
+      while (b > Z) { const ch = Number(b & MASK); if (ch) out.push(ch); b >>= SHIFT; }
+      return out;
+    }
     let n = Number(code) || 0;
     while (n > 0) { const ch = n % 65536; if (ch) out.push(ch); n = Math.floor(n / 65536); }
     return out;
@@ -459,7 +467,7 @@
   const analysisCache = new Map();
   const EMPTY = { effects: [], reqs: [], materials: null, summonOpts: [], fieldLocks: [], controlOne: null, archOnly: null };
   const ACTIVATED = ['activation', 'ignition', 'quick', 'trigger'];
-  const STATE_COND = /^(?:If|While) (?:this card is (?:in|face-up in|on|the only)|this card (?:is )?in your|you control|your opponent controls|you have|your opponent has|there (?:is|are)|this card has|it is|your LP|all |this is the only|you do not|neither|both|you control no)/i;
+  const STATE_COND = /^(?:(?:If|While) (?:this card is (?:in|face-up in|on|the only)|this card (?:is )?in your|you control|your opponent controls|you have|your opponent has|there (?:is|are)|this card has|it is|your LP|all |this is the only|you do not|neither|both|you control no|an? "[^"]+" (?:card|monster)s? is (?:face-up )?on the field\b)|Once while (?:this card is )?face-up on the field$)/i;
   const EVENT_COND = /\b(?:is|are|was|were|gets?|has been|have been)\s+(?:\w+[\s/]+){0,3}?(?:Summoned|Set|sent|destroyed|banished|added|discarded|Tributed|detached|targeted|activated|flipped|returned|shuffled|used|attached|equipped|placed|drawn|revealed|excavated|changed|attacked|removed|negated|moved|declared)\b|\b(?:activates?|declares?|attacks?|leaves|inflicts?|takes|draws?|resolves?|battles?|destroys?|Summons?)\b/i;
 
   function classify(c, s0, cond, activated) {

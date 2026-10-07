@@ -103,6 +103,9 @@
   const NAME_ALIAS_KEY = 'simulador-yugioh:name-aliases';
   let nameAliases = {};
   try { nameAliases = JSON.parse(localStorage.getItem(NAME_ALIAS_KEY) || '{}'); } catch (e) { nameAliases = {}; }
+  // Nombres con que EDOPro conoce algunas cartas solo OCG (la base las muestra con el nombre de Dueling Nexus)
+  const baseNames = {};
+  for (const [n, id] of Object.entries(raw.names || {})) baseNames[nameKey(n)] = Number(id);
 
   const db = {
     T, RACES, ATTRIBUTES, SUBTYPES, LINK_ARROWS, cards, banlistName: banlist.name, norm,
@@ -145,7 +148,7 @@
     findByName(name) {
       if (!nameIndex) nameIndex = new Map(cards.map((c) => [nameKey(c.name), c]));
       const k = nameKey(name);
-      return nameIndex.get(k) || byId.get(nameAliases[k]) || null;
+      return nameIndex.get(k) || byId.get(baseNames[k]) || byId.get(nameAliases[k]) || null;
     },
     /** Recuerda que un nombre escrito de otra forma corresponde a esta carta. */
     addNameAlias(name, id) {

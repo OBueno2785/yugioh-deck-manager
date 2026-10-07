@@ -226,6 +226,8 @@
           const bad = d[s].filter((id) => !db.get(id));
           if (bad.length) { d[s] = d[s].filter((id) => db.get(id)); d.unknownIds = (d.unknownIds || []).concat(bad); }
         }
+        // Cartas que faltaban al importar y que ahora trae la base (también sin conexión)
+        deck.resolvePending(d);
       }
       // Mazos compartidos en el proyecto: se agregan una sola vez a la lista guardada
       const prefs = readPrefs();
