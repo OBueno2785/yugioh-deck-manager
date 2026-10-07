@@ -40,7 +40,8 @@
   const PHASE_SHORT = { main1: 'P1', main2: 'P2' };
 
   // fieldSecond: ir segundo; botCount: 0 (sin rival) | 2 | 3 | '2-3'; botMode: 'smart' | 'aggressive'; botPool: [{ name, copies }]
-  const prefs = Object.assign({ handSize: 5, fieldStrict: true, fieldSecond: false, botCount: 0, botMode: 'smart', botPool: null }, store.prefs());
+  // fieldAuto: tus efectos en Automático (js/effects.js los lee y el campo los hace) o Manual (los haces tú)
+  const prefs = Object.assign({ handSize: 5, fieldStrict: true, fieldSecond: false, botCount: 0, botMode: 'smart', botPool: null, fieldAuto: false }, store.prefs());
   const savePref = (patch) => { Object.assign(prefs, patch); store.savePrefs(Object.assign(store.prefs(), patch)); };
   // Antes el campo repartía prefs.handSize: quien tenía 6 practicaba ir segundo (se guarda una vez como fieldSecond)
   if (store.prefs().fieldSecond === undefined && Number(prefs.handSize) === 6) savePref({ fieldSecond: true });
@@ -60,6 +61,11 @@
   let oppQueued = null;   // respuesta del rival que se muestra al volver a la pestaña del campo
   let revealed = {};      // "Ver mano" del rival, por duelo (S.duelId)
   let recorded = null;    // { duelId, id }: intento ya guardado de este duelo (si se termina otra vez, se actualiza)
+  // Modo Automático (ver "Modo Automático" más abajo)
+  let autoBusy = null;    // { i }: un eslabón automático se está haciendo (espera una respuesta tuya)
+  let autoGen = 0;        // sube al deshacer o empezar otro duelo: lo que estaba esperando una respuesta ya no sigue
+  let dismissFn = null;   // qué hacer si la ventana se cierra sin tocar un botón (fuera de ella, Escape u otra ventana encima)
+  let lastWent = null;    // a dónde fue de verdad la última carta que movió moveNow ('gy', 'ban', 'extra', 'opp', 'gone', una zona...)
 
   const decks = () => window.YGO.builder.decks();
   const blank = () => {
@@ -269,6 +275,9 @@
   }
   function undo() {
     if (!history.length) { toast('No hay nada que deshacer'); return; }
+    // A mitad de un eslabón automático: lo que esperaba respuesta ya no sigue (el eslabón queda sin resolver)
+    if (autoBusy) closeModal();
+    abortAuto();
     S = JSON.parse(history.pop());
     selected = null;
     pending = null;
@@ -291,6 +300,7 @@
     const second = opts.second !== undefined ? !!opts.second : !!freshPrefs().fieldSecond;
     // Una ventana del campo que quedó abierta (p. ej. "El rival responde" del duelo anterior) ya no vale
     if (dialogOpen || pileOpen) closeModal();
+    abortAuto();
     S = blank();
     history = [];
     histBase = 0;
@@ -383,6 +393,26 @@
       level: lv, lv, race: bits(t.race, RACE_BITS, base.race || 0x100), attribute: bits(t.attribute, ATTR_BITS, base.attribute || 0x10),
       isLink: false, scaleL: 0, scaleR: 0, desc: base.desc || 'Ficha creada por un efecto. Desaparece cuando deja el campo.', isToken: true,
     });
+  }
+  /** Código de una carta virtual para las fichas del modo Automático ({ name, race, attribute, level, atk, def } del texto):
+   * el mismo para la misma ficha, registrado en YGO.db para que las reglas la vean como Ficha. → código o null. */
+  function tokenCardId(t) {
+    if (!db.addVirtual) return null;
+    const fb = fx() && fx().bits;
+    const race = typeof t.race === 'number' ? t.race : (fb && fb.race(t.race)) || RACE_BITS[String(t.race || '').toUpperCase()] || 0x100;
+    const attr = typeof t.attribute === 'number' ? t.attribute : (fb && fb.attr(t.attribute)) || ATTR_BITS[String(t.attribute || '').toUpperCase()] || 0x10;
+    const name = String(t.name || 'Token');
+    const lv = Number(t.level) || 1, atk = statNum(t.atk), def = statNum(t.def);
+    let h = 0;
+    for (const ch of [name, race, attr, lv, atk, def].join('|')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    let id = 900000000 + (h % 90000000);
+    for (let k = 0; k < 50; k++, id++) {
+      const c = db.get(id);
+      if (c && c.name === name && c.race === race && c.attribute === attr && c.lv === lv && c.atk === atk && c.def === def) return id;
+      if (!c) break;
+    }
+    db.addVirtual([[id, name, T.MONSTER | T.NORMAL | T.TOKEN, atk, def, lv, race, attr, 3, 0, 'Ficha creada por un efecto. Desaparece cuando deja el campo.']]);
+    return db.get(id) ? id : null;
   }
   /** Carta de una instancia (las fichas, con sus propios datos). */
   const cardOf = (inst) => (!inst ? null : inst.token ? tokenCard(inst) : db.get(inst.id));
@@ -562,17 +592,27 @@
     const notes = arr(botCall('observe', [S, { type: 'move', uids: [uid], from: fromKey(loc), to: dest }], []));
     if (notes.length) { oppNotes(notes); render(); }
   }
-  /** v: veredicto de checkMove (si la jugada fue ilegal, queda marcada en el registro). */
+  /** v: veredicto de checkMove (si la jugada fue ilegal, queda marcada en el registro).
+   * Para el modo Automático: opts.noSnap (sin foto: la tomó quien llama), opts.quiet (sin línea en el registro: la escribe
+   * quien llama) u opts.by ('CL1 «X»' o 'Costo de «X»': la línea dice eso en vez de "Movimiento manual"). lastWent dice a dónde fue. */
   function moveNow(uid, dest, opts, v) {
+    opts = opts || {};
     const loc = locate(uid);
     if (!loc) return false;
     const c = cardOf(loc.list[loc.index]);
+    const note = (text) => {
+      if (opts.quiet) return;
+      if (opts.by) pushLog({ kind: 'auto', text: opts.by + ': ' + text }, v || null);
+      else logManual(text, v);
+    };
+    lastWent = null;
     // Una ficha que deja el campo desaparece
     if (loc.list[loc.index].token && !FIELD_ZONES.includes(dest)) {
-      snapshot();
+      if (!opts.noSnap) snapshot();
       if (loc.area === 'field' && loc.index === 0) takeStack(uid).slice(1).forEach(toGy);
       else loc.list.splice(loc.index, 1);
-      logManual(q(c.name) + ' deja el campo y desaparece');
+      note(q(c.name) + ' deja el campo y desaparece');
+      lastWent = 'gone';
       selected = null;
       render();
       return true;
@@ -587,7 +627,7 @@
       if (isMonsterZone(dest) && !db.isMonster(c) && !opts.attach) { toast('Solo monstruos en esa zona'); return false; }
     }
     else if (opts.overlay || opts.attach) { toast('Elige un monstruo en el campo'); return false; }
-    snapshot();
+    if (!opts.noSnap) snapshot();
     const host = (opts.overlay || opts.attach) ? nameById(S.zones[dest][0].id) : '';
     // Un monstruo que cambia de zona dentro del campo se lleva sus materiales Xyz
     const whole = loc.area === 'field' && loc.index === 0 && FIELD_ZONES.includes(dest) && !opts.attach;
@@ -599,11 +639,13 @@
       // Contact "C" (la Invocó el rival en tu campo): vuelve a la pila del rival
       const to = dest === 'gy' || dest === 'ban' || dest === 'deck' ? dest : 'hand';
       returnToOpp(card, to, loc.area === 'field' && loc.index === 0);
-      logManual(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + { gy: 'Cementerio', ban: 'Desterradas', deck: 'Mazo', hand: 'Mano' }[to] + ' del rival (es su carta)', v);
+      note(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + { gy: 'Cementerio', ban: 'Desterradas', deck: 'Mazo', hand: 'Mano' }[to] + ' del rival (es su carta)');
+      lastWent = 'opp';
       selected = null;
       render();
       return true;
     }
+    lastWent = dest;
     if (dest === 'hand') { S.hand.push(forget(resetCard(card))); }
     else if (dest === 'deck') {
       forget(resetCard(card));
@@ -613,7 +655,7 @@
     }
     else if (dest === 'extra') {
       resetCard(card);
-      if (!db.isExtra(c) && !(c.type & T.PENDULUM)) { S.hand.push(forget(card)); toast('Esa carta no va en el Extra Deck: volvió a la mano'); where = 'Mano'; }
+      if (!db.isExtra(c) && !(c.type & T.PENDULUM)) { S.hand.push(forget(card)); toast('Esa carta no va en el Extra Deck: volvió a la mano'); where = 'Mano'; lastWent = 'hand'; }
       else {
         // Un Péndulo del Mazo Principal solo puede estar boca arriba en el Extra Deck; uno de Fusión/Sincronía/Xyz
         // vuelve boca abajo (así regresa cuando un efecto lo devuelve) salvo que se pida boca arriba
@@ -629,6 +671,7 @@
       resetCard(card).extraFaceUp = true;
       S.extra.push(card);
       where = 'Extra Deck (boca arriba)';
+      lastWent = 'extra';
       toast(PEND_TOAST);
     }
     else if (dest === 'gy' || dest === 'ban') {
@@ -639,7 +682,7 @@
       if (dest === 'gy') {
         quietGy = card.uid; // esta línea del registro ya lo dice
         try {
-          if (toGy(card) === 'ban') { const l = gyToBan(); where = 'Desterradas (en vez del Cementerio' + (l && l.source ? ', por ' + byText(l.source) : '') + ')'; }
+          if (toGy(card) === 'ban') { const l = gyToBan(); where = 'Desterradas (en vez del Cementerio' + (l && l.source ? ', por ' + byText(l.source) : '') + ')'; lastWent = 'ban'; }
         } finally { quietGy = null; }
       }
       else S.ban.push(resetCard(card));
@@ -663,9 +706,10 @@
       arr.splice(i, 1);
       S.extra.push(card);
       where = 'Extra Deck';
+      lastWent = 'extra';
       toast('Los monstruos del Extra Deck regresan al Extra Deck');
     }
-    logManual(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + where, v);
+    note(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + where);
     if (pileOpen && !S[pileOpen].length) closePile();
     selected = null;
     render();
@@ -674,16 +718,18 @@
 
   function firstEmpty(list) { return list.find((z) => !S.zones[z].length); }
 
-  function draw(n) {
+  /** by: robo de un eslabón automático ('CL1 «X»'): sin foto propia y el registro dice quién roba. Devuelve las cartas robadas. */
+  function draw(n, by) {
     n = n || 1;
-    if (!S.deck.length) { toast('El mazo está vacío'); return; }
-    snapshot();
+    if (!S.deck.length) { toast('El mazo está vacío'); return []; }
+    if (!by) snapshot();
     const cards = S.deck.splice(0, n);
     S.hand.push(...cards);
-    pushLog({ kind: 'draw', text: 'Roba ' + cards.map((x) => q(nameById(x.id))).join(', ') });
+    pushLog({ kind: 'draw', text: (by ? by + ': roba ' : 'Roba ') + cards.map((x) => q(nameById(x.id))).join(', ') });
     render();
     // Robar fuera de la Fase de Robo (por un efecto) es añadir a la mano: el rival lo ve (Droll & Lock Bird, Hecahands Godos)
     if (S.turnState.phase !== 'draw') botEvent({ type: 'add', uids: cards.map((x) => x.uid), from: 'deck', draw: true });
+    return cards;
   }
 
   /* ---------- Zonas posibles ---------- */
@@ -738,9 +784,9 @@
 
   /* ---------- Juego: ventana de "jugada ilegal" ---------- */
   /** Hace la jugada si es legal. Si no: en modo estricto pregunta; si no, la hace y queda marcada en rojo. */
-  function gate(v, perform) {
+  function gate(v, perform, cancel) {
     if (v.ok || !strict()) { perform(); return; }
-    illegalDialog(v, perform);
+    illegalDialog(v, perform, cancel);
   }
   function checksHtml(v, okText) {
     const items = v.errors.map((m) => '<li class="err">' + esc(m) + '</li>')
@@ -748,10 +794,11 @@
     if (!items.length && okText) items.push('<li class="ok">' + esc(okText) + '</li>');
     return items.length ? '<ul class="checks">' + items.join('') + '</ul>' : '';
   }
-  function illegalDialog(v, perform) {
+  /** cancel: si se cancela o se cierra la ventana sin elegir (lo usa el modo Automático). */
+  function illegalDialog(v, perform, cancel) {
     openDialog('Jugada ilegal', '<div class="illegal-box"><p>Según las reglas, esta jugada no se puede hacer:</p>' + checksHtml(v)
       + '<p class="hint">Si sabes que es correcta (por un efecto que el sistema no reconoce), puedes hacerla igual: quedará marcada en rojo en el registro.</p></div>',
-    [{ label: 'Hacerla igual', kind: 'ghost-danger', action: perform }, { label: 'Cancelar', kind: 'primary' }]);
+    [{ label: 'Hacerla igual', kind: 'ghost-danger', action: perform }, { label: 'Cancelar', kind: 'primary', action: cancel }], cancel);
   }
   /** Después de una jugada declarada: redibuja y avisa si fue ilegal o tiene advertencias. */
   function afterPlay(v) {
@@ -908,9 +955,12 @@
     if (!f0) return;
     const from = {};
     from[req.uid] = fromKey(f0.loc);
+    // Una Invocación que pidió un eslabón automático (Elfnote Power Patron → Sincronía): al terminar, el eslabón sigue
+    const after = pending && pending.kind === 'summon' && pending.uid === req.uid ? pending.after : null;
     pending = null;
     selected = null;
-    snapshot();
+    // Pedida por un eslabón automático: Deshacer vuelve a antes de ese eslabón (su foto ya está)
+    if (typeof after !== 'function') snapshot();
     // Primero se avisa a las reglas (ven el mismo estado que revisaron) y luego se mueven las cartas
     const e = commit('commitSummon', [req, v], v, { kind: 'summon', text: summonText(req) }, () => {
       if (isNormalMethod(req.method)) S.turnState.normalSummons = (Number(S.turnState.normalSummons) || 0) + 1;
@@ -930,6 +980,18 @@
     if (r) placeSummoned(r.card, req.zone, req.method, req.position, under);
     afterPlay(v);
     botEvent({ type: 'summon', uids: [req.uid], method: req.method, from });
+    if (typeof after === 'function') setTimeout(() => after(true), 0);
+  }
+  /** Termina la invocación en curso sin hacerla (Cancelar, Escape, la carta ya no está): si la pidió un eslabón
+   * automático, se le avisa una sola vez. */
+  function clearPending(ok) {
+    const p = pending;
+    pending = null;
+    if (p && p.kind === 'summon' && typeof p.after === 'function') {
+      const f = p.after;
+      p.after = null;
+      setTimeout(() => f(!!ok), 0);
+    }
   }
 
   /** Entra en el modo de elegir materiales (o sacrificios, o las cartas de una Invocación por Péndulo). */
@@ -938,6 +1000,7 @@
     const f = find(uid);
     if (!f) return;
     closeModal();
+    if (pending && pending.after) clearPending(false);
     pending = {
       kind: 'summon', method, uid,
       picks: method === 'pendulum' ? [uid] : (opts.picks || []).filter((u) => u !== uid),
@@ -948,9 +1011,11 @@
       need: opts.need || 0,
       pm: PROCEDURES.includes(method) ? materialsInfo(f.c) : null,
       // Qué efecto permite la invocación: con una cadena abierta, tu último eslabón (p. ej. Elfnote Power Patron; nunca el del rival)
-      src: method !== 'special' && !isNormalMethod(method) && ownTopCL() >= 0 ? 'chain:' + ownTopCL() : '',
+      src: opts.src != null ? opts.src : method !== 'special' && !isNormalMethod(method) && ownTopCL() >= 0 ? 'chain:' + ownTopCL() : '',
       proc: method === 'special' ? procedureOf(f.c) : null, // Invocación Especial por su procedimiento (con costos)
     };
+    // opts.after(ok): la pidió un eslabón automático (se llama una vez, al invocar o al cancelar)
+    if (typeof opts.after === 'function') pending.after = opts.after;
     selected = null;
     render();
   }
@@ -1263,7 +1328,8 @@
     // Con la cadena en pausa (estás haciendo tus eslabones antes del rival) no se activa nada nuevo
     const mid = S.chain.some((l) => l.done) ? { ok: false, errors: ['La cadena se está resolviendo: toca «Seguir resolviendo» antes de activar otro efecto.'], warnings: [] } : null;
     const v = merge(checkActivation(req), mid, zone ? checkPlacement(S, uid, zone, { method: fx.scale ? 'scale' : 'activate', vacating: oldField ? [oldField.uid] : [] }) : null);
-    gate(v, () => {
+    // prep (modo Automático): costo y objetivos ya elegidos con declareAuto; sin prep, como siempre
+    const perform = (v, prep) => {
       const f1 = find(uid);
       if (!f1) return;
       const from = fromKey(f1.loc); // de dónde se activa (mano, cementerio, zona...): el rival lo mira
@@ -1284,8 +1350,13 @@
         const r = detach(uid);
         S.zones[zone].push(resetCard(r.card));
       } else if (wasSet) inst.faceDown = false;
-      const paid = payOwnCost(uid, fx);
-      if (paid) e.text += ' · costo: ' + paid;
+      // Las cartas del costo se anotan antes de pagar (las reveladas no se mueven; Contact "C" vuelve al rival)
+      const refs = prep ? costRefs(prep) : null;
+      const paid = prep ? payPrep(uid, c, prep) : { text: payOwnCost(uid, fx) };
+      if (paid.text) e.text += ' · costo: ' + paid.text;
+      if (prep) prep.costManual.forEach((t) => { e.text += ' · paga a mano: «' + t + '»'; });
+      if (prep && prep.targets.length) e.text += ' · objetivo: ' + qList(prep.targets.map((t) => t.uid));
+      if (prep) prep.targetManual.forEach((t) => { e.text += ' · objetivo a mano: «' + t + '»'; });
       const link = {
         uid, id: inst.id, effectIndex: fx.index, text: shortText(fx), speed: fx.speed || ruleLink.speed || 1, kind: fx.kind,
         cardAct: !!fx.scale || (st && (!!zone || wasSet || fx.kind === 'activation')), scale: !!fx.scale,
@@ -1294,9 +1365,18 @@
       };
       if (S.chain.length > chainBefore) Object.assign(S.chain[S.chain.length - 1], { snap: link.snap, cardAct: link.cardAct, kind: link.kind, scale: link.scale, owner: 'me', from });
       else S.chain.push(link);
+      if (prep) autoLink(S.chain[S.chain.length - 1], uid, prep, refs, paid.uids);
       afterPlay(v);
       botEvent({ type: 'activation', link: S.chain.length - 1 });
-    });
+    };
+    // Automático: YGO.effects lee el efecto; primero se elige el costo y los objetivos (sin cambiar nada) y después se declara
+    const plan = autoOn() ? planOf(c, fx) : null;
+    if (plan) gate(v, () => declareAuto(uid, fx, plan, st && fx.kind === 'activation', (prep, costV) => {
+      const v2 = merge(v, costV);
+      if (!costV.ok && strict()) illegalDialog(v2, () => perform(v2, prep));
+      else perform(v2, prep);
+    }));
+    else gate(v, () => perform(v, null));
   }
 
   /** Costos de la propia carta que no piden elegir nada ("discard this card", "send this card from your hand to the GY",
@@ -1403,10 +1483,16 @@
   /** Resuelve la cadena de la última a la primera; las Mágicas/Trampas normales que se activaron van al cementerio.
    * Los eslabones negados no hacen nada; los del rival aplican su efecto (YGO.bot.resolveLink).
    * Tus eslabones los haces tú a mano: si hay alguno encima de uno del rival, la cadena se pausa antes del rival
-   * (los resueltos quedan marcados done) para que los hagas primero; "Seguir resolviendo" continúa. */
-  function resolveChain() {
+   * (los resueltos quedan marcados done) para que los hagas primero; "Seguir resolviendo" continúa.
+   * Tus eslabones declarados en Automático (link.auto) se hacen solos, uno por vez y con la cadena todavía abierta
+   * (runAutoLink); al terminar cada uno se sigue con cont = true (sin otra foto). */
+  function resolveChain(cont) {
+    if (autoBusy) { toast('Termina primero lo que te está pidiendo la cadena'); return; }
     if (!S.chain.length) return;
-    snapshot();
+    cont = cont === true;
+    if (!cont) snapshot();
+    let touched = false; // ya se resolvió algún eslabón en esta pasada (el automático necesita su propia foto)
+    let autoAt = -1;
     const negatedMine = [];
     const doing = []; // tus eslabones resueltos en esta pasada (los haces a mano)
     let stop = -1;
@@ -1417,6 +1503,12 @@
       // Ash y Belle solo niegan un eslabón de abajo: no importa el orden. Si tu respuesta lo niega, tampoco.
       if (opp && !l.negated && doing.length && !['Ash', 'Belle'].includes(shortName(l.handtrap || nameById(l.id)))
         && !botCall('negatedBy', [S, i], null)) { stop = i; break; }
+      // Automático (sin negar; si solo perdió su carta, igual se hace lo que se pueda): antes, lo que haces a mano de arriba
+      if (!opp && l.auto && !(l.negated && !l.negated.fizzle)) {
+        if (doing.length) stop = i; else autoAt = i;
+        break;
+      }
+      touched = true;
       l.done = true;
       if (l.negated) {
         const fizzle = !opp && l.negated.fizzle;
@@ -1441,6 +1533,23 @@
         pushLog({ kind: 'resolve', text: 'Resuelve CL' + (i + 1) + ': ' + q(nameById(l.id)) + (l.scale ? ' (Escala de Péndulo)' : l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : '') });
       }
       if (!opp && (!l.negated || l.negated.fizzle)) doing.push('CL' + (i + 1));
+    }
+    if (autoAt >= 0) {
+      if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
+      if (touched || cont) snapshot(); // Deshacer = volver a antes de este eslabón
+      runAutoLink(autoAt);
+      return;
+    }
+    if (stop >= 0 && S.chain[stop].owner !== 'opp') {
+      // Un eslabón tuyo automático más abajo: primero haces a mano lo de arriba
+      const who = q(nameById(S.chain[stop].id));
+      pushLog({ kind: 'resolve', text: 'Pausa antes de CL' + (stop + 1) + ' (automático, ' + who + '): primero haz lo que dice' + (doing.length > 1 ? 'n ' : ' ') + listEs(doing) });
+      render();
+      if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
+      openDialog('Primero tus eslabones', '<p>' + listEs(doing) + (doing.length > 1 ? ' se resuelven' : ' se resuelve') + ' antes que CL' + (stop + 1) + ' (' + esc(who) + ', automático).</p>'
+        + '<p class="hint">Haz ahora en el campo lo que ' + (doing.length > 1 ? 'dicen' : 'dice') + '. Después toca <b>Seguir resolviendo</b> y CL' + (stop + 1) + ' se hace solo.</p>',
+      [{ label: 'Entendido', kind: 'primary' }]);
+      return;
     }
     if (stop >= 0) {
       const who = q(nameById(S.chain[stop].id));
@@ -1509,6 +1618,7 @@
     const n = S.chain.length;
     const l = S.chain[n - 1];
     if (!l) return;
+    abortAuto(); // un eslabón automático a medias (p. ej. eligiendo materiales) queda sin hacer
     const name = q(nameById(l.id));
     const opp = l.owner === 'opp';
     const i = typeof l.snap === 'number' ? l.snap - histBase : -1;
@@ -1532,6 +1642,1058 @@
     S.chain.pop();
     pushLog({ kind: 'activation', text: 'Retira la declaración CL' + n + ' de ' + name });
     render();
+  }
+
+  /* ---------- Modo Automático (js/effects.js) ----------
+   * Con el selector en "Automático", al declarar un efecto YGO.effects lee su texto: se paga el costo (preguntando qué
+   * carta solo si hay para elegir) y se eligen los objetivos (link.targets). Al resolverse la cadena, cada eslabón tuyo
+   * declarado así (link.auto) se hace solo, paso a paso: buscar, Invocar de modo Especial, mandar, robar, desterrar...
+   * Todo pasa por los mismos caminos que a mano (moveNow, draw, commitSummon, removeOppCardNow), así que las reglas, el
+   * rival (Droll, Ash, Nibiru, Contact "C"...), el registro y Deshacer siguen igual. Lo que el lector no entiende con
+   * seguridad no se adivina: se muestra y lo haces tú. Cada eslabón se hace en el modo en que se declaró. */
+  const fx = () => { const E = window.YGO.effects; return E && typeof E === 'object' && typeof E.parse === 'function' ? E : null; };
+  const autoOn = () => prefs.fieldAuto === true && !!fx();
+  const FX_OFF = 'No se cargó js/effects.js: los efectos se hacen a mano';
+  const AUTO_TITLES = { off: 'Declaras el efecto y lo haces tú en el campo', on: 'Al declarar paga el costo y elige objetivos; al resolver hace lo que dice el efecto (lo que no entienda te lo pide a mano)' };
+  let fxFailed = false; // YGO.effects falló: se avisa una vez (ese efecto queda a mano)
+  const planCache = new Map();
+  function fxCall(name, args, fallback) {
+    const E = fx();
+    if (E && typeof E[name] === 'function') {
+      try {
+        const v = E[name].apply(E, args);
+        if (v !== undefined && v !== null) return v;
+      } catch (err) {
+        console.warn('YGO.effects.' + name + ' falló', err);
+        if (!fxFailed) { fxFailed = true; toast('El modo Automático no pudo leer un efecto: ese lo haces a mano', 'warn'); }
+      }
+    }
+    return typeof fallback === 'function' ? fallback() : fallback;
+  }
+  /** Lo que espera una respuesta (ventana, invocación pedida por un eslabón) ya no sigue: Deshacer, otro duelo, pasar turno. */
+  function abortAuto() { autoGen++; autoBusy = null; dismissFn = null; }
+
+  /** Plan de YGO.effects para un efecto (null: se hace a mano). Un efecto que no se activa (continuo, procedimiento) no tiene. */
+  function planOf(c, e) {
+    if (!c || !e || e.scale || e.kind === 'summon' || e.kind === 'continuous') return null;
+    const key = c.id + ':' + e.index;
+    if (planCache.has(key)) return planCache.get(key);
+    const p = fxCall('parse', [c, e.index === 0 ? 0 : e], null);
+    const list = (x) => arr(x).filter((a) => a && typeof a === 'object');
+    const norm = (o) => ({ text: String(o.text || ''), cost: list(o.cost), targets: list(o.targets), actions: list(o.actions), notes: list(o.notes) });
+    const plan = p && typeof p === 'object' && !p.passive ? Object.assign(norm(p), {
+      options: Array.isArray(p.options) && p.options.length ? p.options.filter((o) => o && typeof o === 'object').map(norm) : null,
+      confidence: p.confidence, auto: p.auto !== false,
+    }) : null;
+    planCache.set(key, plan);
+    return plan;
+  }
+  /** El efecto de un eslabón (el mismo objeto que recibió activate). */
+  function effectOfLink(l) {
+    const c = db.get(l.id);
+    if (!c) return null;
+    return effectsOf(c).find((x) => x.index === l.effectIndex) || (l.effectIndex === 0 ? cardActivation(c) : null);
+  }
+
+  /* Selector Manual / Automático (#fd-auto, en la barra del turno; si index.html no lo trae, se arma aquí) */
+  function bindAutoSwitch() {
+    let box = $('#fd-auto');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'fd-auto';
+      box.className = 'seg auto-seg';
+      box.setAttribute('role', 'group');
+      box.setAttribute('aria-label', 'Tus efectos: manual o automático');
+      box.innerHTML = '<button type="button" data-auto="off" aria-pressed="true" title="' + esc(AUTO_TITLES.off) + '">Manual</button>'
+        + '<button type="button" data-auto="on" aria-pressed="false" title="' + esc(AUTO_TITLES.on) + '">Automático</button>';
+      // Con su nombre a la vista ("Tus efectos:"): en el teléfono no hay títulos al pasar el ratón
+      const wrap = document.createElement('div');
+      wrap.className = 'auto-wrap';
+      wrap.innerHTML = '<span class="auto-lbl" aria-hidden="true">Tus efectos:</span>';
+      wrap.appendChild(box);
+      const sw = $('#fd-strict') && $('#fd-strict').closest('label');
+      if (sw && sw.parentNode === $('#fd-turn')) sw.after(wrap); else $('#fd-turn').appendChild(wrap);
+    }
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-auto]');
+      if (!b || b.disabled || !fx()) return;
+      const on = b.dataset.auto === 'on';
+      if (on === (prefs.fieldAuto === true)) return;
+      savePref({ fieldAuto: on });
+      // Los eslabones ya declarados siguen en el modo en que se declararon
+      const open = S && S.chain.some((l) => l.owner !== 'opp' && !l.done && !!l.auto !== on);
+      toast((on ? 'Automático: tus efectos se hacen solos al resolverse (lo que no entienda te lo pide a mano)' : 'Manual: tus efectos los haces tú en el campo')
+        + (open ? '. Los eslabones ya declarados se hacen en el modo en que los declaraste.' : ''), 'ok');
+      renderAutoSwitch();
+    });
+  }
+  function renderAutoSwitch() {
+    const box = $('#fd-auto');
+    if (!box) return;
+    const ok = !!fx();
+    box.title = ok ? '' : FX_OFF;
+    $$('[data-auto]', box).forEach((b) => {
+      b.setAttribute('aria-pressed', String((b.dataset.auto === 'on') === autoOn()));
+      b.disabled = !ok;
+      b.title = ok ? AUTO_TITLES[b.dataset.auto] || '' : FX_OFF;
+    });
+  }
+
+  /* ---------- Automático: cartas posibles y ventanas ---------- */
+  const AREA_ES = {
+    hand: 'la mano', deck: 'el Mazo', extra: 'el Extra Deck', extraUp: 'boca arriba del Extra Deck', gy: 'el Cementerio', ban: 'desterradas',
+    field: 'el campo', fieldUp: 'boca arriba en el campo', mzone: 'tu Zona de Monstruo', stzone: 'tu Zona de Mágicas y Trampas', pzone: 'tu Zona de Péndulo',
+    oppField: 'el campo del rival', oppGy: 'el Cementerio del rival', oppHand: 'la mano del rival',
+  };
+  const areaEs = (a) => { const A = fx() && fx().AREAS; return (A && A[a]) || AREA_ES[a] || a; };
+  const FROM_ES = { deck: 'del Mazo', gy: 'del Cementerio', hand: 'de la mano', ban: 'desterrada', extra: 'del Extra Deck', field: 'del campo' };
+  const PICK_SEC = { hand: 'Mano', deck: 'Mazo', extra: 'Extra Deck', gy: 'Cementerio', ban: 'Desterradas', field: 'Tu campo', oppField: 'Campo del rival', mat: 'Materiales' };
+  const PILE_AREAS = ['hand', 'deck', 'gy', 'ban', 'extra'];
+  // Origen que el texto no dice: descartar es de la mano, sacrificar y cambiar Nivel o posición, de tus monstruos
+  const DEFAULT_FROM = { discard: ['hand'], reveal: ['hand'], tribute: ['mzone'], level: ['mzone'], position: ['mzone'] };
+  const describe = (a) => String(fxCall('describe', [a], () => (a && a.text) || '') || (a && a.text) || '');
+  const oppEntry = (uid) => arr(S.opp && S.opp.field).find((x) => x && x.uid === uid) || null;
+  const anyName = (uid) => { const x = !locate(uid) && oppEntry(uid); return x ? nameById(x.id) : nameOf(uid); };
+  const qList = (uids) => listEs(uids.map((u) => q(anyName(u))));
+
+  /** Zonas o pilas de donde sale lo que pide la acción (nunca el Cementerio, la mano ni el Mazo del rival). */
+  function areasOf(a) {
+    let from = Array.isArray(a.from) && a.from.length ? a.from.slice() : null;
+    if (!from) from = a.owner === 'opp' ? ['oppField'] : a.owner === 'any' ? ['field', 'oppField'] : (DEFAULT_FROM[a.verb] || ['field']).slice();
+    return from.filter((x, i) => from.indexOf(x) === i && !['oppGy', 'oppHand', 'oppDeck'].includes(x));
+  }
+  /** Cartas que cumplen la acción: [{ uid, inst, c, area, zone, opp }]. o: { self, exclude: Set, costCards, targetCards } */
+  function candidates(a, o) {
+    o = o || {};
+    const out = [];
+    const skip = o.exclude || new Set();
+    const base = { selfUid: o.self, costCards: o.costCards || [], targetCards: o.targetCards || [] };
+    const add = (inst, area, zone, opp) => {
+      if (!inst || skip.has(inst.uid) || out.some((x) => x.uid === inst.uid)) return;
+      const c = opp ? db.get(inst.id) : cardOf(inst);
+      if (!c) return;
+      // Un monstruo del Extra Deck no puede ir a la mano (volvería al Extra Deck)
+      if (a.verb === 'add' && db.isExtra(c)) return;
+      if (a.filter && !fxCall('match', [c, a.filter, Object.assign({ inst, area, zone: zone || null, opp: !!opp }, base)], false)) return;
+      out.push({ uid: inst.uid, inst, c, area, zone: zone || null, opp: !!opp });
+    };
+    const tops = (zs, up) => zs.forEach((z) => { const t = S.zones[z][0]; if (t && (!up || !t.faceDown)) add(t, 'field', z); });
+    areasOf(a).forEach((area) => {
+      if (['hand', 'deck', 'gy', 'ban'].includes(area)) S[area].forEach((x) => add(x, area));
+      else if (area === 'extra' || area === 'extraUp') S.extra.forEach((x) => { if (area === 'extra' || x.extraFaceUp) add(x, 'extra'); });
+      else if (area === 'field' || area === 'fieldUp') tops(FIELD_ZONES, area === 'fieldUp');
+      else if (area === 'mzone') tops(a.zone === 'center' ? ['mz2'] : [...EMZ, ...MZ]);
+      else if (area === 'stzone') tops([...ST, 'fz']);
+      else if (area === 'pzone') tops(['st0', 'st4']);
+      else if (area === 'oppField') arr(S.opp && S.opp.field).forEach((x) => { if (x && !x.blank && x.id) add(x, 'oppField', null, true); });
+    });
+    return out;
+  }
+  /** Sin nada que elegir: justo las que pide, o copias iguales en pilas (cualquiera sirve). Si el efecto también deja
+   * elegir del rival (su campo, Cementerio o mano: sin rival o con su campo a medias no se ofrecen todas), siempre se
+   * pregunta: quizá quieras esa (MST con tu única Mágica boca arriba no la destruye sin preguntar). */
+  const noChoice = (cands, min, max, a) => min > 0 && min === max && cands.length >= min
+    && !(a && (a.owner === 'any' || a.owner === 'opp'))
+    && !arr(a && a.from).some((x) => ['oppField', 'oppGy', 'oppHand', 'oppDeck', 'oppExtra'].includes(x))
+    && (cands.length === min || cands.every((x) => PILE_AREAS.includes(x.area) && x.c.id === cands[0].c.id));
+
+  /** Ventana para elegir cartas. o: { title, action, cands, min, max, optional, cancel, dismiss }
+   * → Promise de [uids] | 'skip' | 'manual' | 'cancel'. Si es 1 de 1, tocar la carta ya la elige. */
+  function pickCards(o) {
+    return new Promise((resolve) => {
+      const min = Math.max(0, Number(o.min) || 0);
+      const max = Math.max(min, Number(o.max) || 0, 1);
+      const single = min === 1 && max === 1;
+      // Las copias del Mazo van juntas (cualquiera sirve): una miniatura con ×N
+      const groups = [];
+      o.cands.forEach((x) => {
+        const g = x.area === 'deck' && groups.find((y) => y.area === 'deck' && y.c.id === x.c.id);
+        if (g) g.uids.push(x.uid);
+        else groups.push({ key: 'g' + groups.length, area: x.opp ? 'oppField' : x.area, c: x.c, inst: x.inst, opp: x.opp, uids: [x.uid] });
+      });
+      const secs = [];
+      groups.forEach((g) => { if (!secs.includes(g.area)) secs.push(g.area); });
+      const tile = (g) => '<div class="slot-card' + (g.opp ? ' ax-opp' : '') + '" data-pick="' + g.key + '" role="button" tabindex="0">'
+        + (g.inst && g.inst.token ? tokenTile(g.c) : view.tile(g.c)) + (g.opp ? '<span class="ax-who">Rival</span>' : '')
+        + (g.uids.length > 1 ? '<span class="ax-n">×' + g.uids.length + '</span>' : '') + '</div>';
+      const body = '<p class="hint">' + esc(describe(o.action)) + '</p>' + (o.action.text ? '<p class="fx-src">' + esc(o.action.text) + '</p>' : '')
+        + secs.map((sec) => {
+          const gs = groups.filter((g) => g.area === sec);
+          if (sec === 'deck') gs.sort((a, b) => a.c.name.localeCompare(b.c.name));
+          return '<h3 class="pile-sec">' + esc(PICK_SEC[sec] || sec) + ' · ' + gs.reduce((s, g) => s + g.uids.length, 0) + '</h3>'
+            + '<div class="pile-grid ax-pick">' + gs.map(tile).join('') + '</div>';
+        }).join('')
+        + (single ? '' : '<p class="ax-count" id="ax-count"></p>');
+      const sel = new Map();
+      const chosen = () => groups.flatMap((g) => g.uids.slice(0, sel.get(g.key) || 0));
+      const names = new Map(groups.flatMap((g) => g.uids.map((u) => [u, g.c.name])));
+      const distinct = (u) => !(o.action.filter && o.action.filter.distinctNames) || new Set(u.map((x) => names.get(x))).size === u.length;
+      const valid = (u) => u.length >= min && u.length <= max && distinct(u);
+      const done = (r) => { closeModal(); resolve(r); };
+      const buttons = [];
+      if (o.cancel) buttons.push({ label: 'Cancelar', action: () => resolve('cancel') });
+      buttons.push({ label: 'Hacer a mano', kind: 'link-btn', action: () => resolve('manual') });
+      if (o.optional || min === 0) buttons.push({ label: 'Saltar', action: () => resolve('skip') });
+      if (!single) buttons.push({ label: 'Confirmar', kind: 'primary', keep: true, action: () => { const u = chosen(); if (valid(u)) done(u); } });
+      openDialog(o.title, body, buttons, () => resolve(o.dismiss || 'manual'));
+      const root = $('#modal-body');
+      const upd = () => {
+        $$('[data-pick]', root).forEach((el) => {
+          const g = groups.find((x) => x.key === el.dataset.pick);
+          const n = sel.get(g.key) || 0;
+          el.classList.toggle('pick', n > 0);
+          const badge = $('.ax-n', el);
+          if (badge) badge.textContent = n ? n + ' de ' + g.uids.length : '×' + g.uids.length;
+        });
+        const k = chosen().length;
+        const cnt = $('#ax-count', root);
+        if (cnt) cnt.textContent = min < max ? 'Elige de ' + min + ' a ' + max + ' · elegidas: ' + k : 'Elegidas: ' + k + ' de ' + max;
+        const cb = $$('#modal-foot button').find((b) => b.textContent === 'Confirmar');
+        if (cb) cb.disabled = !valid(chosen());
+      };
+      const tap = (key) => {
+        const g = groups.find((x) => x.key === key);
+        if (!g) return;
+        if (single) { done([g.uids[0]]); return; }
+        const n = sel.get(key) || 0;
+        if (n < g.uids.length && chosen().length < max) sel.set(key, n + 1);
+        else if (n) sel.set(key, 0);
+        else { toast('Ya elegiste ' + nOf(max, 'carta')); return; }
+        upd();
+      };
+      $$('[data-pick]', root).forEach((el) => {
+        el.addEventListener('click', () => tap(el.dataset.pick));
+        el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tap(el.dataset.pick); } });
+      });
+      upd();
+    });
+  }
+  /** Sí / No (o Saltar) → true | false, o null si se cierra sin responder (Escape, tocar fuera) o "Hacer a mano": nunca se
+   * contesta "No" por ti. */
+  function yesNo(title, html, yes, no) {
+    return new Promise((resolve) => openDialog(title, html, [{ label: 'Hacer a mano', kind: 'link-btn', action: () => resolve(null) },
+      { label: no || 'Saltar', action: () => resolve(false) },
+      { label: yes || 'Sí', kind: 'primary', action: () => resolve(true) }], () => resolve(null)));
+  }
+  /** Una opción de una lista → Promise del índice, o null (Cancelar o cerrarla). Al resolver, el botón dice "Hacer a mano". */
+  function chooseP(title, sub, labels, cancelLabel) {
+    return new Promise((resolve) => chooser(title, sub, labels.map((l, i) => ({ label: l, kind: i ? '' : 'primary', action: () => resolve(i) })), () => resolve(null), cancelLabel));
+  }
+  /** "Jugada ilegal" → Promise: true si la haces igual. */
+  const askIllegal = (v) => new Promise((resolve) => illegalDialog(v, () => resolve(true), () => resolve(false)));
+
+  /** Zona y posición de una Invocación Especial automática → Promise de { zone, position } | 'manual' | null (no hay zona). */
+  function chooseSummonPlace(uid, a, R) {
+    const f = find(uid);
+    const c = f.c;
+    const link = !!(c.type & T.LINK);
+    const free = (zs) => zs.filter((z) => !S.zones[z].length && !emzTaken(z));
+    let zones = legalZones(uid, [], 'special').filter((z) => !emzTaken(z));
+    let bad = false;
+    if (!zones.length) { zones = free(zoneOrder(c, f.loc.area, 'special')); bad = true; } // ninguna válida: las libres (las reglas dirán por qué)
+    if (a.zone === 'linked') { const lz = linkedZones(); zones = zones.filter((z) => lz.has(z)); }
+    if (a.zone === 'emz') zones = zones.filter((z) => EMZ.includes(z));
+    if (a.zone === 'center') zones = zones.filter((z) => z === 'mz2');
+    if (!zones.length) return Promise.resolve(null);
+    const req0 = { method: 'special', uid, materials: [], position: 'atk', source: R.source, sourceUid: R.l.uid, sourceId: R.l.id };
+    const center = zones.includes('mz2') && (a.zone === 'center' || /center Main Monster Zone/i.test(c.desc || ''));
+    const best = center ? 'mz2' : bestZone(req0);
+    const dflt = zones.includes(best) ? best : zones[0];
+    const fixed = link ? 'atk' : a.position === 'def' || a.position === 'atk' || a.position === 'set' ? a.position : null;
+    const FIXED = { def: 'En defensa (lo dice el efecto)', atk: 'En ataque (lo dice el efecto)', set: 'Boca abajo en defensa (lo dice el efecto)' };
+    const html = '<p class="fx-src">' + esc(a.text || '') + '</p>'
+      + (link ? '<p class="hint">Los monstruos Link siempre van en posición de ataque.</p>'
+        : fixed ? '<p class="hint ax-fixed">' + FIXED[fixed] + '</p>'
+          // Boca abajo solo si el efecto lo dice (entonces la posición ya viene fija)
+          : '<div class="field"><span>Posición</span><div class="seg ax-pos" id="ax-pos" role="group" aria-label="Posición">'
+          + [['atk', 'ATK'], ['def', 'DEF']].map(([k, l]) => '<button type="button" data-pos="' + k + '" aria-pressed="' + (k === 'atk') + '">' + l + '</button>').join('') + '</div></div>')
+      + '<label class="field"><span>Zona</span><select id="ax-zone">' + zones.map((z) => '<option value="' + z + '"' + (z === dflt ? ' selected' : '') + '>'
+        + esc(placeName(z) + (z === 'mz2' ? ' (central)' : '') + (bad ? ' (no válida)' : '')) + '</option>').join('') + '</select></label>';
+    return new Promise((resolve) => {
+      openDialog('Invocación Especial · ' + c.name, html, [
+        { label: 'Hacer a mano', kind: 'link-btn', action: () => resolve('manual') },
+        { label: 'Invocar', kind: 'primary', keep: true, action: () => {
+          const zone = $('#ax-zone').value;
+          const position = fixed || (($('#ax-pos [aria-pressed="true"]') || {}).dataset || {}).pos || 'atk';
+          closeModal();
+          resolve({ zone, position });
+        } },
+      ], () => resolve('manual'));
+      $$('#ax-pos [data-pos]').forEach((b) => b.addEventListener('click', () => {
+        $$('#ax-pos [data-pos]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      }));
+    });
+  }
+
+  /* ---------- Automático: declarar (opción, costo y objetivos) ---------- */
+  const COST_DEST = { discard: 'gy', send: 'gy', tribute: 'gy', detach: 'gy', banish: 'ban', returnHand: 'hand', returnDeck: 'deck', deckTop: 'deck' };
+  const cantPay = (a) => new Promise((resolve) => openDialog('No puedes pagar el costo', '<p>No hay cartas que cumplan: ' + esc(describe(a)) + '.</p>'
+    + '<p class="hint">Si sabes que sí puedes (por un efecto que el sistema no reconoce), declara el efecto y págalo a mano.</p>',
+  [{ label: 'Declararlo y pagar a mano', kind: 'ghost-danger', action: () => resolve(true) }, { label: 'Cancelar', kind: 'primary', action: () => resolve(false) }], () => resolve(false)));
+  const noTargets = (a) => new Promise((resolve) => openDialog('No hay objetivos válidos', '<p>No hay cartas que cumplan: ' + esc(describe(a)) + '.</p>',
+    [{ label: 'Declararlo sin objetivo', kind: 'ghost-danger', action: () => resolve(true) }, { label: 'Cancelar', kind: 'primary', action: () => resolve(false) }], () => resolve(false)));
+  /** Materiales Xyz de la carta (si está boca arriba en una Zona de Monstruo). */
+  function materialsOf(uid) {
+    const f = find(uid);
+    return f && f.loc.area === 'field' && f.loc.index === 0 ? S.zones[f.loc.zone].slice(1) : [];
+  }
+
+  /** Elige la opción, el costo y los objetivos sin cambiar nada; al final go(prep, costV). Cancelar (o cerrar) no declara.
+   * cardAct: la carta se activa (Mágica/Trampa): no paga su propio costo con ella misma ni se elige como objetivo. */
+  async function declareAuto(uid, e, plan, cardAct, go) {
+    const gen = autoGen;
+    const f = find(uid);
+    if (!f) return;
+    const c = f.c;
+    const alive = () => gen === autoGen && !!find(uid);
+    let cost = plan.cost.slice(), targets = plan.targets.slice(), option = null;
+    if (plan.options) {
+      const k = await chooseP('¿Qué efecto activas?', c.name, plan.options.map((o, i) => o.text || 'Efecto ' + (i + 1)));
+      if (k == null || !alive()) return;
+      option = k;
+      cost = cost.concat(plan.options[k].cost);
+      targets = targets.concat(plan.options[k].targets);
+    }
+    const prep = { option, cost: [], costManual: [], targets: [], targetManual: [] };
+    const used = new Set(cardAct ? [uid] : []);
+    const cardsOf = (uids) => uids.map((u) => { const x = find(u); return x ? x.c : oppEntry(u) ? db.get(oppEntry(u).id) : null; }).filter(Boolean);
+    const costCards = () => cardsOf(prep.cost.flatMap((s) => s.uids));
+    const toManual = (a) => { prep.costManual.push(a.text || describe(a)); };
+    for (const a of cost) {
+      if (!alive()) return;
+      const n = a.count && !a.count.all ? Math.max(Number(a.count.min) || 0, 1) : 1;
+      const max = a.count && !a.count.all ? Math.max(Number(a.count.max) || 0, n) : n;
+      if (a.verb === 'manual' || !a.verb) { toManual(a); continue; }
+      if (a.refers === 'this') { prep.cost.push({ a, uids: [uid] }); used.add(uid); continue; }
+      if (a.refers || (a.count && a.count.all)) { toManual(a); continue; }
+      if (a.verb === 'payLP') { prep.cost.push({ a, uids: [] }); continue; }
+      if (a.verb === 'banishTop' || a.verb === 'millTop') {
+        if (S.deck.length < max) { if (!(await cantPay(a)) || !alive()) return; toManual(a); continue; }
+        prep.cost.push({ a, uids: [] });
+        continue;
+      }
+      if ((!COST_DEST[a.verb] && a.verb !== 'reveal') || (a.verb === 'deckTop' && a.deckPos === 'topOrBottom')) { toManual(a); continue; }
+      let cands;
+      if (a.verb === 'detach') {
+        // Desacoplar de esta carta (si dice otra, a mano)
+        if (a.host && a.host !== 'this') { toManual(a); continue; }
+        cands = materialsOf(uid).map((m) => ({ uid: m.uid, inst: m, c: cardOf(m), area: 'mat', zone: null, opp: false }));
+      } else cands = candidates(a, { self: uid, exclude: used, costCards: costCards() });
+      if (cands.length < n) { if (!(await cantPay(a)) || !alive()) return; toManual(a); continue; }
+      let uids;
+      if (noChoice(cands, n, max, a)) {
+        uids = cands.slice(0, n).map((x) => x.uid);
+        toast('Única carta posible: ' + qList(uids), 'ok');
+      } else {
+        const r = await pickCards({ title: 'Costo · ' + c.name, action: a, cands, min: n, max, cancel: true, dismiss: 'cancel' });
+        if (r === 'cancel' || !alive()) return;
+        if (!Array.isArray(r)) { toManual(a); continue; }
+        uids = r;
+      }
+      uids.forEach((u) => used.add(u));
+      prep.cost.push({ a, uids });
+    }
+    // Objetivos, después del costo (las cartas del costo ya se conocen: "with a different Attribute" las mira)
+    for (const a of targets) {
+      if (!alive()) return;
+      if (a.verb === 'manual' || !a.verb) { prep.targetManual.push(a.text || ''); continue; }
+      if (!areasOf(a).length) continue; // en el Cementerio o la mano del rival: no se pregunta (el rival lo resuelve)
+      const n = Math.max(Number(a.count && a.count.min) || 0, 1);
+      const max = Math.max(Number(a.count && a.count.max) || 0, n);
+      // "with a different Attribute" y el costo se pagó a mano: no sé con qué comparar → objetivo a mano
+      const ref = fxCall('diffRefOf', [a.filter], null);
+      if ((ref === 'cost' && !costCards().length) || (ref === 'targets' && !prep.targets.length)) { prep.targetManual.push(a.text || ''); continue; }
+      const cands = candidates(a, { self: uid, exclude: used, costCards: costCards(), targetCards: cardsOf(prep.targets.map((t) => t.uid)) });
+      if (cands.length < n) { if (!(await noTargets(a)) || !alive()) return; prep.targetManual.push(a.text || ''); continue; }
+      let pick;
+      if (noChoice(cands, n, max, a)) {
+        pick = cands.slice(0, n);
+        toast('Único objetivo posible: ' + qList(pick.map((x) => x.uid)), 'ok');
+      } else {
+        const r = await pickCards({ title: 'Objetivo · ' + c.name, action: a, cands, min: n, max, cancel: true, dismiss: 'cancel' });
+        if (r === 'cancel' || !alive()) return;
+        if (!Array.isArray(r)) { prep.targetManual.push(a.text || ''); continue; }
+        pick = r.map((u) => cands.find((x) => x.uid === u));
+      }
+      pick.forEach((x) => { used.add(x.uid); prep.targets.push({ uid: x.uid, id: x.c.id, opp: x.opp }); });
+    }
+    if (!alive()) return;
+    // Lo que las reglas digan de pagar así (Artifact Lancea: nadie destierra)
+    const vs = [];
+    prep.cost.forEach(({ a, uids }) => {
+      if (a.verb === 'banishTop' && noBanish()) vs.push(fail(noBanishText(noBanish())));
+      const dest = COST_DEST[a.verb];
+      if (dest && a.verb !== 'detach') uids.filter((u) => u !== uid || !cardAct).forEach((u) => vs.push(checkMove(u, dest)));
+    });
+    go(prep, merge(...vs));
+  }
+
+  /** Paga el costo elegido (sin foto: la tomó la declaración). → { text para el registro, uids de las cartas movidas } */
+  function payPrep(uid, c, prep) {
+    const parts = [], uids = [];
+    prep.cost.forEach(({ a, uids: list }) => {
+      if (a.verb === 'payLP') {
+        const before = Number(S.lp) || 0;
+        const n = a.lp === 'half' ? Math.floor(before / 2) : Math.max(0, Number(a.lp) || 0);
+        S.lp = Math.max(0, before - n);
+        parts.push('pagas ' + n + ' LP (LP ' + before + ' → ' + S.lp + ')');
+        return;
+      }
+      if (a.verb === 'banishTop' || a.verb === 'millTop') {
+        const r = topCards(a);
+        if (r.text) parts.push(r.text);
+        uids.push(...r.uids);
+        return;
+      }
+      if (a.verb === 'reveal') { parts.push('revela ' + qList(list)); return; }
+      const host = a.verb === 'detach' ? nameOf(uid) : '';
+      // "shuffle ... into the Deck" baraja; "place ... on the bottom of the Deck" va abajo
+      const move = a.verb === 'returnDeck' ? { shuffle: true } : a.verb === 'deckTop' ? { bottom: a.deckPos === 'bottom' } : {};
+      const moved = moveCards(list, a, COST_DEST[a.verb], { move });
+      if (!moved.length) return;
+      parts.push(moveText(Object.assign({}, a, move), moved) + (host ? ' de ' + q(host) : ''));
+      uids.push(...moved.map((x) => x.uid));
+    });
+    return { text: parts.join('; '), uids };
+  }
+  /** Cartas del costo elegidas al declarar (también las reveladas), con su código, mientras siguen donde estaban.
+   * "with a different Attribute" compara con las que se eligieron; si solo se pagó con esta carta, con esta carta. */
+  function costRefs(prep) {
+    const steps = prep.cost.filter((x) => x.uids.length);
+    const chosen = steps.filter((x) => x.a.refers !== 'this');
+    const idOf = (u) => { const x = find(u); const c = x ? x.c : oppEntry(u) ? db.get(oppEntry(u).id) : null; return c ? c.id : 0; };
+    return {
+      uids: steps.flatMap((x) => x.uids),
+      ids: (chosen.length ? chosen : steps).flatMap((x) => x.uids).map(idOf).filter(Boolean),
+    };
+  }
+  /** Deja en el eslabón lo que necesita para resolverse solo (todo en S: Deshacer lo incluye). */
+  function autoLink(L, uid, prep, refs, paidUids) {
+    const f = find(uid);
+    const locOf = (t) => {
+      if (t.opp) return { uid: t.uid, id: t.id, area: 'oppField', zone: null, opp: true };
+      const x = find(t.uid);
+      return { uid: t.uid, id: t.id, area: x ? x.loc.area : null, zone: x && x.loc.zone || null, opp: false };
+    };
+    // Las de arriba del Mazo (banishTop, millTop) se conocen al pagar
+    const top = arr(paidUids).filter((u) => !refs.uids.includes(u));
+    const topIds = top.map((u) => { const x = find(u); return x ? x.c.id : 0; }).filter(Boolean);
+    L.targets = prep.targets.map((t) => t.uid);
+    L.auto = {
+      v: 1, option: prep.option, costCards: refs.uids.concat(top), costIds: refs.ids.concat(topIds), costManual: prep.costManual.length > 0,
+      targetManual: prep.targetManual.length > 0,
+      targetLocs: prep.targets.map(locOf), thisLoc: f ? { area: f.loc.area, zone: f.loc.zone || null } : null, ran: false, left: [],
+    };
+  }
+
+  /* ---------- Automático: mover cartas ---------- */
+  /** Mueve cartas tuyas por moveNow (sin foto ni línea propia) y avisa al rival como un movimiento a mano.
+   * → [{ uid, name, from, went, by }]. opts: los de moveNow (bottom, shuffle, faceDown...) y adds (avisar "añadir a la mano"). */
+  function moveCards(uids, a, dest0, opts) {
+    const out = [];
+    const adds = {};
+    uids.forEach((u) => {
+      const f = find(u);
+      if (!f) return;
+      let dest = dest0;
+      if ((dest === 'hand' || dest === 'deck') && db.isExtra(f.c) && !f.inst.token && a.verb !== 'add') dest = 'extra';
+      const loc = f.loc;
+      const upExtra = loc.area === 'extra' && !!f.inst.extraFaceUp;
+      if (!moveNow(u, dest, Object.assign({ noSnap: true, quiet: true }, opts.move || {}), opts.v ? opts.v[u] : null)) return;
+      const went = lastWent;
+      const by = went === 'ban' && dest === 'gy' ? (gyToBan() || {}).source || '' : '';
+      out.push({ uid: u, name: f.c.name, from: loc.area, went, by, dest });
+      if (dest === 'hand' && S.hand.some((x) => x.uid === u) && (loc.area === 'deck' || loc.area === 'gy' || loc.area === 'ban' || upExtra)) (adds[loc.area] = adds[loc.area] || []).push(u);
+      else if (!(loc.area === 'field' && loc.index > 0)) movedNotice(loc, u, dest); // un material desacoplado no deja el campo
+    });
+    // Una vez por pila de origen, como al añadir a mano (Droll & Lock Bird, Hecahands Godos lo miran)
+    if (opts.adds) Object.keys(adds).forEach((from) => botEvent({ type: 'add', uids: adds[from], from }));
+    return out;
+  }
+  /** Texto del registro de un movimiento: 'añade «A» del Mazo a la mano', 'destruye «B» (va boca arriba al Extra Deck)'... */
+  function moveText(a, list) {
+    const note = (x) => (x.went === 'ban' && x.dest === 'gy' ? ' (queda desterrada' + (x.by ? ' por ' + byText(x.by) : '') + ')'
+      : x.went === 'extra' && (x.dest !== 'extra' || /^return|^deckTop/.test(a.verb)) ? (x.dest === 'gy' ? ' (va boca arriba al Extra Deck)' : ' (al Extra Deck)')
+        : x.went === 'opp' ? ' (vuelve al rival: es su carta)' : x.went === 'gone' ? ' (desaparece)' : '');
+    const names = listEs(list.map((x) => q(x.name) + note(x)));
+    const from = list.map((x) => FROM_ES[x.from]).filter((x, i, l) => x && l.indexOf(x) === i).join(' o ');
+    switch (a.verb) {
+      case 'add': return 'añade ' + names + (from ? ' ' + from : '') + ' a la mano';
+      case 'send': return 'manda ' + names + (from ? ' ' + from : '') + ' al Cementerio';
+      case 'discard': return 'descarta ' + names;
+      case 'tribute': return 'sacrifica ' + names;
+      case 'detach': return 'desacopla ' + names;
+      case 'banish': return 'destierra ' + names + (a.faceDown ? ' (boca abajo)' : '');
+      case 'destroy': return 'destruye ' + names;
+      case 'returnHand': return 'devuelve ' + names + ' a la mano';
+      case 'returnDeck': return 'baraja ' + names + ' en el Mazo';
+      case 'deckTop': return 'pone ' + names + (a.bottom ? ' abajo del Mazo' : ' arriba del Mazo');
+      default: return 'mueve ' + names;
+    }
+  }
+  /** Las N cartas de arriba del Mazo: desterradas (banishTop) o al Cementerio (millTop). → { did, text, uids, blocked } */
+  function topCards(a) {
+    const n = Math.max(1, Number(a.count && a.count.max) || 1);
+    if (S.deck.length < n) return { did: false, text: '', uids: [], blocked: 'No hay ' + nOf(n, 'carta') + ' en el Mazo.' };
+    if (a.verb === 'banishTop') {
+      const nb = noBanish();
+      if (nb) return { did: false, text: '', uids: [], blocked: noBanishText(nb) };
+      const cards = S.deck.splice(0, n);
+      cards.forEach((x) => S.ban.push(resetCard(x)));
+      return { did: true, uids: cards.map((x) => x.uid), text: 'destierra ' + (n === 1 ? 'la carta' : 'las ' + n + ' cartas') + ' de arriba del Mazo' + (a.faceDown ? ' (boca abajo)' : '') };
+    }
+    const cards = S.deck.splice(0, n);
+    const out = cards.map((x) => {
+      quietGy = x.uid;
+      let went;
+      try { went = toGy(x); } finally { quietGy = null; }
+      return q(nameById(x.id)) + (went === 'ban' ? ' (queda desterrada)' : '');
+    });
+    return { did: true, uids: cards.map((x) => x.uid), text: 'manda al Cementerio de arriba del Mazo: ' + out.join(', ') };
+  }
+
+  /* ---------- Automático: resolver un eslabón ---------- */
+  /** Hace solo el eslabón i (ya marcado done, con la cadena todavía abierta: el rival no responde en medio). */
+  function runAutoLink(i) {
+    const l = S.chain[i];
+    const gen = autoGen;
+    l.done = true;
+    pushLog({ kind: 'resolve', text: 'Resuelve CL' + (i + 1) + ': ' + q(nameById(l.id)) + (l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : '') });
+    autoBusy = { i };
+    render();
+    const finish = (R) => {
+      if (gen !== autoGen) return;
+      autoBusy = null;
+      const left = R ? R.left : ['Lo que dice el efecto'];
+      const L = S.chain[i];
+      if (L && L.auto) { L.auto.ran = true; L.auto.left = left.slice(); }
+      const card = q(nameById(l.id));
+      if (left.length && S.chain.some((x, k) => k < i && !x.done)) {
+        // Quedan eslabones abajo: pausa para que termines esto a mano antes de seguir
+        pushLog({ kind: 'resolve', text: 'Pausa: haz a mano lo que falta de CL' + (i + 1) + ' (' + card + ')' });
+        render();
+        openDialog('Termina a mano CL' + (i + 1), '<p>Esto de ' + esc(card) + ' no se hace solo:</p><ul class="fx-left">' + left.map((t) => '<li>' + esc(t) + '</li>').join('') + '</ul>'
+          + '<p class="hint">Hazlo en el campo y después toca <b>Seguir resolviendo</b>.</p>', [{ label: 'Entendido', kind: 'primary' }]);
+        return;
+      }
+      if (left.length) {
+        // Último eslabón: la cadena se cierra, pero lo que falta queda a la vista hasta que lo cierras
+        pushLog({ kind: 'auto', text: 'Haz a mano (CL' + (i + 1) + '): «' + left.join('», «') + '»' });
+        render();
+        let went = false;
+        const close = () => { if (went || gen !== autoGen) return; went = true; resolveChain(true); };
+        openDialog('Termina a mano CL' + (i + 1), '<p>Esto de ' + esc(card) + ' no se hace solo:</p><ul class="fx-left">' + left.map((t) => '<li>' + esc(t) + '</li>').join('') + '</ul>'
+          + '<p class="hint">Hazlo en el campo; la cadena se cierra al tocar <b>Entendido</b>.</p>', [{ label: 'Entendido', kind: 'primary', action: close }], close);
+        return;
+      }
+      resolveChain(true);
+    };
+    runLink(i, gen).then(finish, (err) => { console.warn('YGO.field.auto falló', err); finish(null); });
+  }
+
+  /** Va por las acciones del plan en orden. → Promise de R ({ left: textos que quedan a mano }) o null si se deshizo. */
+  async function runLink(i, gen) {
+    const l = S.chain[i];
+    const c = db.get(l.id);
+    const R = {
+      i, n: i + 1, l, gen, card: c ? c.name : '?', left: [], prevDid: true, prevUids: [], opp: [],
+      source: 'el efecto de ' + q(c ? c.name : '?') + (l.effectIndex ? ' (efecto ' + l.effectIndex + ')' : ''),
+    };
+    R.by = 'CL' + R.n + ' ' + q(R.card);
+    const plan = planOf(c, effectOfLink(l));
+    if (!plan) { R.left.push(l.text || 'Lo que dice el efecto'); return R; }
+    const opt = l.auto.option != null && plan.options ? plan.options[l.auto.option] : null;
+    const actions = plan.actions.concat(opt ? opt.actions : []);
+    const notes = plan.notes.concat(opt ? opt.notes : []);
+    const log = (text) => pushLog({ kind: 'auto', text: 'CL' + R.n + ': ' + text });
+    for (let k = 0; k < actions.length; k++) {
+      if (gen !== autoGen) return null;
+      const a = actions[k];
+      // Lo que no se entiende no se adivina: eso y lo que sigue (puede depender de eso) quedan a mano
+      if (a.verb === 'manual' || !RUN[a.verb]) { R.left.push(...actions.slice(k).map((x) => x.text || describe(x)).filter(Boolean)); break; }
+      if (a.dependsOnPrevious && !R.prevDid) { log('no se hace «' + a.text + '» (depende de lo anterior)'); continue; }
+      if (a.condition) {
+        const yes = await yesNo('CL' + R.n + ' · ' + R.card, '<p>¿Se cumple esta condición?</p><p class="fx-src">' + esc(a.condition) + '</p>', 'Sí', 'No');
+        if (gen !== autoGen) return null;
+        if (yes === null) { R.left.push(...actions.slice(k).map((x) => x.text || describe(x)).filter(Boolean)); break; }
+        if (!yes) { log('no se cumple «' + a.condition + '»: no se hace «' + a.text + '»'); R.prevDid = false; continue; }
+      }
+      if (a.optional && !picks(a) && a.verb !== 'procSummon') {
+        const yes = await yesNo('CL' + R.n + ' · ' + R.card, '<p>¿Quieres hacerlo?</p><p class="fx-src">' + esc(a.text || describe(a)) + '</p>');
+        if (gen !== autoGen) return null;
+        if (yes === null) { R.left.push(...actions.slice(k).map((x) => x.text || describe(x)).filter(Boolean)); break; }
+        if (!yes) { log('salta «' + a.text + '»'); R.prevDid = false; continue; }
+      }
+      let r;
+      try { r = await RUN[a.verb](a, R); } catch (err) { console.warn('YGO.field.auto falló', err); r = { manual: true }; }
+      if (gen !== autoGen) return null;
+      if (r.manual) { R.left.push(...actions.slice(k).map((x) => x.text || describe(x)).filter(Boolean)); break; }
+      R.prevDid = !!r.did;
+      R.prevUids = r.did ? arr(r.uids) : [];
+      if (r.did && a.note) pushLog({ kind: 'auto', text: 'CL' + R.n + ' · Recuerda: ' + a.note });
+    }
+    if (gen !== autoGen) return null;
+    // Lo que hace sobre el rival (negar, su LP, su mano...) y lo que dura (ATK, "durante la End Phase") no se anota en el campo
+    const oppTexts = R.opp.concat(notes.filter((x) => x.kind === 'opp').map((x) => x.text)).filter(Boolean);
+    if (oppTexts.length) log('lo que hace sobre el rival («' + oppTexts.join('», «') + '») lo resuelve el rival o no se simula.');
+    notes.filter((x) => ['stat', 'delayed', 'linger'].includes(x.kind) && x.text)
+      .forEach((x) => pushLog({ kind: 'auto', text: 'CL' + R.n + ' · Recuerda: «' + x.text + '» (no se anota en el campo)' }));
+    render();
+    return R;
+  }
+  /** ¿La acción se elige con una ventana de cartas (ahí está "Saltar")? */
+  const picks = (a) => !a.refers && !!a.count && !a.count.all && !['draw', 'millTop', 'banishTop', 'token', 'payLP', 'lpGain'].includes(a.verb);
+
+  /** Cartas sobre las que actúa la acción: la referencia ("this card", "that target"...) o las que eliges.
+   * → { uids } | { none } (no hay, se anotó) | { skip } | { manual } */
+  async function cardsFor(a, R, o) {
+    o = o || {};
+    const l = R.l;
+    const log = (text) => pushLog({ kind: 'auto', text: 'CL' + R.n + ': ' + text });
+    if (a.refers) {
+      const lost = (who, area) => { log(who + ' ya no está en ' + areaEs(area) + ': no se hace «' + a.text + '»'); return { none: true }; };
+      const at = (x, t) => !!x && x.loc.area === t.area && (t.area !== 'field' || (x.loc.zone === t.zone && x.loc.index === 0));
+      if (a.refers === 'this') {
+        const t = l.auto.thisLoc;
+        return t && at(find(l.uid), t) ? { uids: [l.uid] } : lost(q(R.card), t ? t.area : 'field');
+      }
+      if (a.refers === 'targets') {
+        const locs = arr(l.auto.targetLocs);
+        if (!locs.length) return { manual: true }; // el objetivo no se eligió aquí (a mano o del rival)
+        const ok = locs.filter((t) => (t.opp ? !!oppEntry(t.uid) : at(find(t.uid), t)));
+        if (!ok.length) return lost(listEs(locs.map((t) => q(nameById(t.id)))), locs[0].area);
+        return { uids: ok.map((t) => t.uid) };
+      }
+      if (a.refers === 'previous') {
+        const u = R.prevUids.filter((x) => locate(x) || oppEntry(x));
+        if (!u.length) { log('no hay cartas de lo anterior: no se hace «' + a.text + '»'); return { none: true }; }
+        return { uids: u };
+      }
+      if (a.refers === 'cost') {
+        const u = arr(l.auto.costCards).filter((x) => locate(x));
+        if (!u.length) { log('las cartas del costo ya no están: no se hace «' + a.text + '»'); return { none: true }; }
+        return { uids: u };
+      }
+      return { manual: true };
+    }
+    if (!a.count) return { manual: true };
+    const costCards = arr(l.auto.costIds).map((id) => db.get(id)).filter(Boolean);
+    const targetCards = arr(l.auto.targetLocs).map((t) => db.get(t.id)).filter(Boolean);
+    // "with a different Attribute" sin las cartas con qué comparar (el costo o el objetivo se hicieron a mano): a mano
+    const ref = fxCall('diffRefOf', [a.filter], null);
+    if ((ref === 'cost' && !costCards.length) || (ref === 'targets' && !targetCards.length)) {
+      log('no sé con qué carta comparar («' + a.text + '»): hazlo a mano');
+      return { manual: true };
+    }
+    // Sin rival en el campo: lo que haría sobre sus cartas lo resuelve él ("destroy all": las tuyas sí se hacen)
+    const oppOff = areasOf(o.action || a).includes('oppField') && !oppOn();
+    if (oppOff && (a.count.all || a.owner === 'opp')) R.opp.push(a.text || describe(a));
+    const cands = candidates(o.action || a, { self: l.uid, costCards, targetCards });
+    const none = () => {
+      // Sin rival: solo del rival → ya quedó anotado; "1 card on the field" sin cartas tuyas → puede ser suya: a mano
+      if (oppOff) return a.count.all || a.owner === 'opp' ? { none: true } : { manual: true };
+      const t = 'CL' + R.n + ': no hay cartas que cumplan · ' + describe(a); pushLog({ kind: 'auto', text: t }); toast(t, 'warn'); return { none: true };
+    };
+    if (a.count.all) return cands.length ? { uids: cands.map((x) => x.uid) } : none();
+    const min = Math.max(0, Number(a.count.min) || 0), max = Math.max(min, Number(a.count.max) || 0, 1);
+    const title = 'CL' + R.n + ' · ' + R.card;
+    if (a.each) {
+      // "up to 1 … each from your hand, Deck, and GY": una ventana por lugar
+      const out = [];
+      for (const area of areasOf(a)) {
+        const cs = cands.filter((x) => x.area === (area === 'extraUp' ? 'extra' : area));
+        if (!cs.length) continue;
+        const r = await pickCards({ title: title + ' · ' + (PICK_SEC[area] || area), action: a, cands: cs, min, max, optional: true });
+        if (R.gen !== autoGen) return { manual: true };
+        if (r === 'manual') return { manual: true };
+        if (Array.isArray(r)) out.push(...r);
+      }
+      if (!cands.length) return none();
+      if (!out.length) { log('salta «' + a.text + '»'); return { skip: true }; }
+      return { uids: out };
+    }
+    if (!cands.length) return none();
+    if (cands.length < min) {
+      log('solo hay ' + nOf(cands.length, 'carta') + ' que cumpla' + (cands.length === 1 ? '' : 'n') + ' (pide ' + min + ') · ' + describe(a));
+      return { manual: true };
+    }
+    if (!a.optional && noChoice(cands, min, max, a)) return { uids: cands.slice(0, min).map((x) => x.uid) };
+    const r = await pickCards({ title, action: a, cands, min, max, optional: !!a.optional });
+    if (R.gen !== autoGen || r === 'manual') return { manual: true };
+    if (r === 'skip' || !r.length) { log('salta «' + a.text + '»'); return { skip: true }; }
+    return { uids: r };
+  }
+
+  /** Mover (añadir, mandar, descartar, desterrar, destruir, devolver): las del rival pasan por YGO.bot. */
+  async function runMove(a, R, dest) {
+    const sel = await cardsFor(a, R);
+    if (sel.manual) return { manual: true };
+    if (!sel.uids) return { did: false };
+    return moveFor(sel.uids, a, R, dest);
+  }
+  async function moveFor(uids, a, R, dest) {
+    const log = (text, v) => pushLog({ kind: 'auto', text: 'CL' + R.n + ': ' + text }, v || null);
+    const blocked = (why) => { log('no se hace «' + a.text + '» · ' + why); toast(why, 'bad'); };
+    const move = {};
+    if (a.verb === 'returnDeck') move.shuffle = true;
+    if (a.verb === 'deckTop') {
+      let bottom = a.deckPos === 'bottom';
+      if (a.deckPos === 'topOrBottom') {
+        const k = await chooseP('¿Arriba o abajo del Mazo?', R.card, ['Arriba', 'Abajo'], 'Hacer a mano');
+        if (k == null || R.gen !== autoGen) return { manual: true };
+        bottom = k === 1;
+      }
+      move.bottom = bottom;
+    }
+    const mine = [], vs = {}, done = [];
+    const HOW = { destroy: 'destroy', banish: 'banish', returnHand: 'hand' };
+    for (const u of uids) {
+      if (!locate(u) && oppEntry(u)) {
+        // Del campo del rival: lo hace YGO.bot (anota su línea con "(por CLn «X»)")
+        if (!HOW[a.verb]) { R.opp.push(a.text); continue; }
+        const r = removeOppCardNow(u, HOW[a.verb], R.by);
+        if (r.ok) done.push(u); else blocked(r.why);
+        continue;
+      }
+      const f = find(u);
+      if (!f) continue;
+      // Droll & Lock Bird (del Mazo a la mano) y Artifact Lancea (desterrar): las reglas lo revisan
+      if ((dest === 'hand' && f.loc.area === 'deck') || dest === 'ban') {
+        const v = checkMove(u, dest);
+        if (!v.ok && strict()) { blocked(v.errors[0]); continue; }
+        if (!v.ok || v.warnings.length) vs[u] = v;
+      }
+      mine.push(u);
+    }
+    const list = moveCards(mine, a, dest, { move, v: vs, adds: dest === 'hand' });
+    if (list.length) {
+      const v = merge(...list.map((x) => vs[x.uid]).filter(Boolean));
+      pushLog({ kind: 'auto', text: R.by + ': ' + moveText(Object.assign({}, a, move), list) }, v.errors.length || v.warnings.length ? v : null);
+    }
+    render();
+    const all = done.concat(list.map((x) => x.uid));
+    return { did: all.length > 0, uids: all };
+  }
+
+  /** Invoca de modo Especial las cartas elegidas (cada una con su zona y posición) y avisa al rival una vez. */
+  async function summonCards(uids, a, R) {
+    const placed = [], from = {};
+    for (const u of uids) {
+      if (R.gen !== autoGen) return { manual: true };
+      const f = find(u);
+      if (!f) continue;
+      if (!db.isMonster(f.c)) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': ' + q(f.c.name) + ' no es un monstruo: no se Invoca' }); continue; }
+      const place = await chooseSummonPlace(u, a, R);
+      if (R.gen !== autoGen) return { manual: true };
+      if (place === 'manual') return placed.length ? summonDone(placed, from, a, R, true) : { manual: true };
+      if (!place) {
+        const t = 'CL' + R.n + ': no queda una zona libre para ' + q(f.c.name) + ': no se Invoca';
+        pushLog({ kind: 'auto', text: t });
+        toast(t, 'warn');
+        continue;
+      }
+      const req = {
+        method: 'special', uid: u, zone: place.zone, position: place.position, materials: [],
+        source: R.source, sourceUid: R.l.uid, sourceId: R.l.id, sourceEffect: R.l.effectIndex,
+      };
+      if (a.treatedAs) req.treatedAs = a.treatedAs;
+      const v = verifySummon(req);
+      if (!v.ok && strict()) {
+        const go = await askIllegal(v);
+        if (R.gen !== autoGen) return { manual: true };
+        if (!go) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': no se Invoca ' + q(f.c.name) + ' (jugada ilegal)' }); continue; }
+      }
+      from[u] = fromKey(f.loc);
+      const e = commit('commitSummon', [req, v], v, { kind: 'summon', text: summonText(req) }, null);
+      if (req.zone && !String(e.text).includes(placeName(req.zone))) e.text += ' en ' + placeName(req.zone);
+      if (req.position === 'def' && !/en DEF/.test(e.text)) e.text += ', en DEF';
+      if (req.position === 'set' && !/boca abajo/.test(e.text)) e.text += ', boca abajo en DEF';
+      if (a.treatedAs) e.text += ' (se trata como ' + (METHOD[a.treatedAs] || a.treatedAs) + ')';
+      const r = detach(u);
+      if (!r) continue;
+      placeSummoned(r.card, req.zone, a.treatedAs || 'special', req.position);
+      if (a.negateEffects) r.card.negated = { turn: S.turnState.turn, by: R.card, self: true };
+      placed.push(u);
+      render();
+    }
+    return summonDone(placed, from, a, R, false);
+  }
+  function summonDone(placed, from, a, R, manual) {
+    if (placed.length) {
+      render();
+      // Una sola Invocación para el rival (Nibiru cuenta Invocaciones; Fuwalos, Purulia y Meowls miran de dónde salen)
+      botEvent({ type: 'summon', uids: placed.slice(), method: a.treatedAs || 'special', from });
+    }
+    return manual ? { manual: true } : { did: placed.length > 0, uids: placed };
+  }
+
+  /** Coloca (set) o pone boca arriba (placeST, placePZ) Mágicas/Trampas o Péndulos en tu campo. */
+  async function runPlace(a, R) {
+    const sel = await cardsFor(a, R);
+    if (sel.manual) return { manual: true };
+    if (!sel.uids) return { did: false };
+    const out = [];
+    for (const u of sel.uids) {
+      const f = find(u);
+      if (!f) continue;
+      const c = f.c;
+      let zone = null;
+      if (a.verb === 'placePZ') {
+        const free = ['st0', 'st4'].filter((z) => !S.zones[z].length);
+        if (free.length === 2) {
+          const k = await chooseP('¿En qué Zona de Péndulo?', c.name, ['Izquierda', 'Derecha'], 'Hacer a mano');
+          if (k == null || R.gen !== autoGen) return out.length ? { did: true, uids: out } : { manual: true };
+          zone = free[k];
+        } else zone = free[0] || null;
+      } else if (!db.isMonster(c) && c.type & T.FIELD) {
+        zone = 'fz';
+        // Una Mágica de Campo nueva reemplaza a la anterior (la anterior va al cementerio)
+        const old = S.zones.fz[0];
+        if (old && old.uid !== u) { sendMaterial(old.uid, 'gy'); pushLog({ kind: 'auto', text: R.by + ': ' + q(nameById(old.id)) + ' va al cementerio (la reemplaza ' + q(c.name) + ')' }); }
+      } else if (db.isMonster(c)) zone = firstEmpty(ST);
+      else zone = legalZones(u, [], a.verb === 'set' ? 'set' : 'activate', a.verb === 'set' ? { faceDown: true } : {})[0] || firstEmpty(ST);
+      if (!zone || S.zones[zone].length) {
+        pushLog({ kind: 'auto', text: 'CL' + R.n + ': no queda una zona libre para ' + q(c.name) + ': no se hace «' + a.text + '»' });
+        continue;
+      }
+      if (!moveNow(u, zone, { noSnap: true, quiet: true, faceDown: a.verb === 'set' })) continue;
+      const g = find(u);
+      if (a.verb === 'set' && g) g.inst.setTurn = S.turnState.turn;
+      movedNotice(f.loc, u, zone);
+      pushLog({ kind: 'auto', text: R.by + ': ' + (a.verb === 'set' ? 'coloca ' : 'pone ') + q(c.name) + (a.verb === 'set' ? '' : ' boca arriba') + ' en ' + placeName(zone) });
+      out.push(u);
+    }
+    render();
+    return { did: out.length > 0, uids: out };
+  }
+
+  /** Nivel, posición y LP: cambios en tus cartas que no las mueven. */
+  async function runLevel(a, R) {
+    const sel = a.refers ? await cardsFor(a, R) : { uids: candidates(Object.assign({}, a, { from: ['mzone'] }), { self: R.l.uid }).map((x) => x.uid) };
+    if (sel.manual) return { manual: true };
+    if (!sel.uids) return { did: false };
+    const out = [];
+    sel.uids.forEach((u) => {
+      const f = find(u);
+      if (!f) { if (oppEntry(u)) R.opp.push(a.text); return; }
+      if (f.loc.area !== 'field' || f.loc.index !== 0 || !isMonsterZone(f.loc.zone) || f.inst.faceDown || !db.isMonster(f.c) || f.c.type & (T.XYZ | T.LINK)) return;
+      const before = levelOf(f.inst, f.c);
+      const after = Math.max(1, before + (Number(a.amount) || 0));
+      if (after === f.c.lv) delete f.inst.level; else f.inst.level = after;
+      pushLog({ kind: 'auto', text: 'Nivel de ' + q(f.c.name) + ': ' + before + ' → ' + after + ' (por ' + R.by + ')' });
+      out.push(u);
+    });
+    if (a.owner === 'any' && !a.refers) R.opp.push(a.text); // los del rival no se tocan
+    render();
+    return { did: out.length > 0, uids: out };
+  }
+  async function runPosition(a, R) {
+    const sel = await cardsFor(a, R);
+    if (sel.manual) return { manual: true };
+    if (!sel.uids) return { did: false };
+    const out = [];
+    sel.uids.forEach((u) => {
+      const f = find(u);
+      if (!f) { if (oppEntry(u)) R.opp.push(a.text); return; }
+      if (f.loc.area !== 'field' || f.loc.index !== 0 || !isMonsterZone(f.loc.zone)) return;
+      const pos = a.position === 'toggle' ? (f.inst.def ? 'atk' : 'def') : a.position;
+      if (!['atk', 'def', 'set'].includes(pos)) return;
+      setPosition(f.inst, pos);
+      pushLog({ kind: 'auto', text: R.by + ': ' + q(f.c.name) + ' queda ' + { atk: 'en ATK', def: 'en DEF', set: 'boca abajo en DEF' }[pos] });
+      out.push(u);
+    });
+    render();
+    return { did: out.length > 0, uids: out };
+  }
+
+  /** Fusión/Sincronía/Xyz/Link/Ritual: eliges el monstruo y los materiales se eligen como siempre (banda de materiales). */
+  async function runProc(a, R) {
+    const m = a.method;
+    const label = METHOD[m] || 'Invocación';
+    const bit = { fusion: T.FUSION, synchro: T.SYNCHRO, xyz: T.XYZ, link: T.LINK, ritual: T.RITUAL }[m];
+    if (!bit) return { manual: true };
+    const go = await new Promise((resolve) => {
+      const btns = [];
+      if (a.optional) btns.push({ label: 'Saltar', action: () => resolve('skip') });
+      btns.push({ label: 'Hacer a mano', kind: 'link-btn', action: () => resolve('manual') });
+      btns.push({ label: 'Elegir monstruo', kind: 'primary', action: () => resolve('go') });
+      openDialog('CL' + R.n + ' · ' + R.card, '<p>Ahora puedes hacer una ' + esc(label) + (a.after ? ' (inmediatamente después de este efecto)' : '') + ':</p>'
+        + '<p class="fx-src">' + esc(a.text || '') + '</p>', btns, () => resolve('manual')); // cerrarla no es "Saltar"
+    });
+    if (R.gen !== autoGen || go === 'manual') return { manual: true };
+    const log = (text) => pushLog({ kind: 'auto', text: 'CL' + R.n + ': ' + text });
+    if (go === 'skip') { log('salta «' + a.text + '»'); return { did: false }; }
+    // De donde dice el texto ("from your hand or GY"); si no dice, Ritual de la mano y lo demás del Extra Deck (boca abajo)
+    const PILE = { hand: () => S.hand, deck: () => S.deck, gy: () => S.gy, ban: () => S.ban,
+      extra: () => S.extra.filter((x) => !x.extraFaceUp), extraUp: () => S.extra.filter((x) => x.extraFaceUp) };
+    const pool = arr(a.from && a.from.length ? a.from : [m === 'ritual' ? 'hand' : 'extra']).filter((x) => PILE[x])
+      .flatMap((x) => PILE[x]().map((y) => [y, x === 'extraUp' ? 'extra' : x]));
+    const cands = pool.map(([x, area]) => ({ uid: x.uid, inst: x, c: db.get(x.id), area, zone: null, opp: false }))
+      .filter((x) => x.c && db.isMonster(x.c) && x.c.type & bit && (!a.filter || fxCall('match', [x.c, a.filter, { inst: x.inst, area: x.area, selfUid: R.l.uid }], false)));
+    if (!cands.length) { log('no hay monstruos para la ' + label); return { did: false }; }
+    const r = await pickCards({ title: label + ' · ' + R.card, action: a, cands, min: 1, max: 1, optional: !!a.optional });
+    if (R.gen !== autoGen || r === 'manual') return { manual: true };
+    if (!Array.isArray(r)) { log('salta «' + a.text + '»'); return { did: false }; }
+    const uid = r[0];
+    const self = find(R.l.uid);
+    const picks = a.including === 'this' && self && self.loc.area === 'field' && self.loc.index === 0 ? [R.l.uid] : [];
+    const ok = await new Promise((resolve) => startSummon(m, uid, { src: 'chain:' + R.i, picks, after: resolve }));
+    if (R.gen !== autoGen) return { manual: true };
+    if (!ok) { log('no se hizo la ' + label + ' (la cancelaste)'); return { did: false }; }
+    return { did: true, uids: [uid] };
+  }
+
+  /** Lo que hace cada verbo del plan (js/effects.js) con las funciones del campo. Cada uno → Promise de { did, uids } | { manual } */
+  const RUN = {
+    add: (a, R) => runMove(a, R, 'hand'),
+    send: (a, R) => runMove(a, R, 'gy'),
+    discard: (a, R) => runMove(Object.assign({}, a, { from: a.from || ['hand'] }), R, 'gy'),
+    tribute: (a, R) => runMove(a, R, 'gy'),
+    banish: (a, R) => runMove(a, R, 'ban'),
+    destroy: (a, R) => runMove(a, R, 'gy'),
+    returnHand: (a, R) => runMove(a, R, 'hand'),
+    returnDeck: (a, R) => runMove(a, R, 'deck'),
+    deckTop: (a, R) => runMove(a, R, 'deck'),
+    detach: async (a, R) => {
+      if (a.host && a.host !== 'this') return { manual: true };
+      const mats = materialsOf(R.l.uid);
+      const n = Math.max(1, Number(a.count && a.count.min) || 1);
+      if (mats.length < n) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': no hay ' + nOf(n, 'material') + ' que desacoplar' }); return { did: false }; }
+      let uids = mats.slice(0, n).map((x) => x.uid);
+      // "then you can detach": opcional aunque no haya nada que elegir
+      if (a.optional && !(mats.length > n && !mats.every((x) => x.id === mats[0].id))) {
+        const yes = await yesNo('CL' + R.n + ' · ' + R.card, '<p>¿Quieres hacerlo?</p><p class="fx-src">' + esc(a.text || describe(a)) + '</p>');
+        if (R.gen !== autoGen || yes === null) return { manual: true };
+        if (!yes) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': salta «' + a.text + '»' }); return { did: false }; }
+      }
+      if (mats.length > n && !mats.every((x) => x.id === mats[0].id)) {
+        const r = await pickCards({ title: 'CL' + R.n + ' · ' + R.card, action: a, cands: mats.map((x) => ({ uid: x.uid, inst: x, c: cardOf(x), area: 'mat' })), min: n, max: n, optional: !!a.optional });
+        if (R.gen !== autoGen || r === 'manual') return { manual: true };
+        if (!Array.isArray(r)) return { did: false };
+        uids = r;
+      }
+      return moveFor(uids, a, R, 'gy');
+    },
+    ss: async (a, R) => {
+      const sel = await cardsFor(a, R);
+      if (sel.manual) return { manual: true };
+      if (!sel.uids) return { did: false };
+      return summonCards(sel.uids, a, R);
+    },
+    addOrSS: async (a, R) => {
+      const sel = await cardsFor(a, R);
+      if (sel.manual) return { manual: true };
+      if (!sel.uids) return { did: false };
+      const u = sel.uids[0];
+      const k = await chooseP('¿Qué haces con ' + q(nameOf(u)) + '?', R.card, ['Añadir a la mano', 'Invocar de modo Especial'], 'Hacer a mano');
+      if (R.gen !== autoGen || k == null) return { manual: true };
+      return k === 0 ? moveFor([u], Object.assign({}, a, { verb: 'add' }), R, 'hand') : summonCards([u], a, R);
+    },
+    token: async (a, R) => {
+      const t = a.token || {};
+      const n = Math.max(1, Number(a.count && a.count.max) || 1);
+      const position = a.position === 'set' ? 'set' : a.position === 'def' ? 'def' : 'atk';
+      // Cada ficha es una carta (virtual) con sus datos: las reglas la ven como Ficha (material, bloqueos), no como la carta que la crea
+      const id = tokenCardId(t);
+      if (!id) return { manual: true };
+      const name = q(t.name || 'Token');
+      const uids = [], vs = [];
+      for (let k = 0; k < n; k++) {
+        if (R.gen !== autoGen) return { manual: true };
+        const zone = firstEmpty(MZ);
+        if (!zone) break;
+        const c = db.get(id);
+        const inst = game.instance(id);
+        inst.token = { name: c.name, atk: c.atk, def: c.def, level: c.lv, attribute: c.attribute, race: c.race };
+        // Como cualquier Invocación Especial: reglas (bloqueos como "no puedes Invocar de modo Especial este turno"), registro y rival.
+        // Mientras se revisa, la ficha está "en la mano" (las reglas buscan la carta que se invoca)
+        const req = { method: 'special', uid: inst.uid, zone, position, materials: [], source: R.source, sourceUid: R.l.uid, sourceId: R.l.id, sourceEffect: R.l.effectIndex };
+        S.hand.push(inst);
+        const out = () => { const j = S.hand.findIndex((x) => x.uid === inst.uid); if (j >= 0) S.hand.splice(j, 1); };
+        const v = verifySummon(req);
+        if (!v.ok && strict()) {
+          out();
+          const go = await askIllegal(v);
+          if (R.gen !== autoGen) return { manual: true };
+          if (!go) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': no se invoca ' + name + ' (jugada ilegal)' }); break; }
+          S.hand.push(inst);
+        }
+        // Lo que las reglas llevan de cada Invocación (una por ficha); el registro lleva una sola línea
+        run('commitSummon', [S, req, v], () => null);
+        vs.push(v);
+        out();
+        placeSummoned(inst, zone, 'special', position);
+        uids.push(inst.uid);
+      }
+      if (uids.length) {
+        const v = merge(...vs);
+        pushLog({ kind: 'summon', text: 'CL' + R.n + ' ' + q(R.card) + ': invoca ' + uids.length + ' ' + name + (position === 'def' ? ' en DEF' : position === 'set' ? ' boca abajo en DEF' : '') }, v.errors.length || v.warnings.length ? v : null);
+      }
+      if (uids.length < n) pushLog({ kind: 'auto', text: 'CL' + R.n + ': no quedan Zonas de Monstruo para ' + (n - uids.length) + ' ' + name });
+      render();
+      if (uids.length) botEvent({ type: 'summon', uids: uids.slice(), method: 'special', from: {} });
+      return { did: uids.length > 0, uids };
+    },
+    draw: async (a, R) => {
+      const n = Math.max(1, Number(a.count && a.count.max) || 1);
+      if (S.deck.length < n) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': no hay ' + nOf(n, 'carta') + ' en el Mazo para robar' }); return { did: false }; }
+      const cards = draw(n, R.by);
+      return { did: cards.length > 0, uids: cards.map((x) => x.uid) };
+    },
+    banishTop: async (a, R) => topRun(a, R),
+    millTop: async (a, R) => topRun(a, R),
+    set: (a, R) => runPlace(a, R),
+    placeST: (a, R) => runPlace(a, R),
+    placePZ: (a, R) => runPlace(a, R),
+    attach: async (a, R) => {
+      const hostUid = a.host === 'this' ? R.l.uid : a.host === 'targets' ? arr(R.l.auto.targetLocs).map((t) => t.uid).find((u) => find(u)) : null;
+      const h = hostUid && find(hostUid);
+      if (!h || h.loc.area !== 'field' || h.loc.index !== 0 || !isMonsterZone(h.loc.zone)) return { manual: true };
+      const sel = await cardsFor(a, R);
+      if (sel.manual) return { manual: true };
+      if (!sel.uids) return { did: false };
+      const out = [];
+      sel.uids.filter((u) => u !== hostUid && find(u)).forEach((u) => {
+        const f = find(u);
+        if (moveNow(u, h.loc.zone, { noSnap: true, quiet: true, attach: true })) { out.push(u); movedNotice(f.loc, u, h.loc.zone); }
+      });
+      if (out.length) pushLog({ kind: 'auto', text: R.by + ': acopla ' + qList(out) + ' a ' + q(h.c.name) });
+      render();
+      return { did: out.length > 0, uids: out };
+    },
+    position: (a, R) => runPosition(a, R),
+    level: (a, R) => runLevel(a, R),
+    payLP: async (a, R) => {
+      const before = Number(S.lp) || 0;
+      const n = a.lp === 'half' ? Math.floor(before / 2) : Math.max(0, Number(a.lp) || 0);
+      S.lp = Math.max(0, before - n);
+      pushLog({ kind: 'auto', text: R.by + ': pagas ' + n + ' LP (LP ' + before + ' → ' + S.lp + ')' });
+      render();
+      return { did: true, uids: [] };
+    },
+    lpGain: async (a, R) => {
+      const n = a.lp === 'half' ? Math.floor((Number(S.lp) || 0) / 2) : Math.max(0, Number(a.lp) || 0);
+      const before = Number(S.lp) || 0;
+      S.lp = before + n;
+      pushLog({ kind: 'auto', text: R.by + ': ganas ' + n + ' LP (LP ' + before + ' → ' + S.lp + ')' });
+      render();
+      return { did: true, uids: [] };
+    },
+    reveal: async (a, R) => {
+      const sel = await cardsFor(a, R);
+      if (sel.manual) return { manual: true };
+      if (!sel.uids) return { did: false };
+      pushLog({ kind: 'auto', text: R.by + ': revela ' + qList(sel.uids) });
+      return { did: true, uids: sel.uids };
+    },
+    procSummon: (a, R) => runProc(a, R),
+  };
+  function topRun(a, R) {
+    const r = topCards(a);
+    if (r.blocked) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': no se hace «' + a.text + '» · ' + r.blocked }); return { did: false }; }
+    pushLog({ kind: 'auto', text: R.by + ': ' + r.text });
+    render();
+    return { did: r.did, uids: r.uids };
   }
 
   /* ---------- Posiciones ---------- */
@@ -1613,6 +2775,7 @@
       run('passTurn', [S], () => localPassTurn(S));
       ensureState();
       S.chain = [];
+      abortAuto();
       pending = null;
       selected = null;
       afterPlay(v);
@@ -1889,8 +3052,11 @@
     toast.t = setTimeout(() => { el.hidden = true; }, kind === 'bad' ? 4200 : 2600);
   }
 
-  /** Diálogo en la ventana compartida. buttons: [{ label, kind, action }]; el botón cierra antes de actuar. */
-  function openDialog(title, bodyHtml, buttons) {
+  /** Diálogo en la ventana compartida. buttons: [{ label, kind, action, keep }]; el botón cierra antes de actuar
+   * (keep: no cierra; la acción decide). onDismiss: si se cierra sin tocar un botón (fuera de la ventana, Escape u otra
+   * ventana encima); lo usa el modo Automático. */
+  function openDialog(title, bodyHtml, buttons, onDismiss) {
+    if (dismissFn && !$('#modal').hidden) fireDismiss();
     pileOpen = null;
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = bodyHtml;
@@ -1901,24 +3067,32 @@
       el.type = 'button';
       el.textContent = b.label;
       el.className = b.kind || '';
-      el.addEventListener('click', () => { closeModal(); if (b.action) b.action(); });
+      el.addEventListener('click', () => { if (!b.keep) closeModal(); if (b.action) b.action(); });
       foot.appendChild(el);
     });
     $('#modal').hidden = false;
     dialogOpen = true;
+    dismissFn = typeof onDismiss === 'function' ? onDismiss : null;
     const first = $('.primary', foot) || foot.lastChild;
     if (first) setTimeout(() => first.focus(), 30);
   }
   function closeModal() {
     pileOpen = null;
     dialogOpen = false;
+    dismissFn = null;
     $('#modal').hidden = true;
   }
-  /** Lista de opciones (p. ej. "¿Cómo la invocas?"). items: [{ label, kind, action }] */
-  function chooser(title, cardName, items) {
+  /** La ventana se cerró sin tocar un botón: avisa a quien esperaba la respuesta (después, para no pisar otra ventana). */
+  function fireDismiss() {
+    const f = dismissFn;
+    dismissFn = null;
+    if (f) setTimeout(f, 0);
+  }
+  /** Lista de opciones (p. ej. "¿Cómo la invocas?"). items: [{ label, kind, action }]; onCancel: Cancelar o cerrarla. */
+  function chooser(title, cardName, items, onCancel, cancelLabel) {
     openDialog(title, '<p class="hint">' + esc(cardName) + '</p><div class="chooser">'
       + items.map((it, i) => '<button type="button" class="' + (it.kind || '') + '" data-ch="' + i + '">' + esc(it.label) + '</button>').join('')
-      + '</div>', [{ label: 'Cancelar' }]);
+      + '</div>', [{ label: cancelLabel || 'Cancelar', kind: cancelLabel ? 'link-btn' : '', action: onCancel }], onCancel);
     $$('[data-ch]', $('#modal-body')).forEach((b) => b.addEventListener('click', () => {
       closeModal();
       items[Number(b.dataset.ch)].action();
@@ -2073,7 +3247,7 @@
     ensureState();
     flushRedirects();
     if (sweepTokens()) toast('Las fichas desaparecen cuando dejan el campo');
-    if (pending && !locate(pending.uid)) pending = null;
+    if (pending && !locate(pending.uid)) clearPending(false);
     if (pending && pending.kind === 'summon') pending.picks = pending.picks.filter((u) => locate(u));
     // Primero / Segundo: lo del duelo actual
     const second = !!(S.start ? S.start.second : S.turnState.turn === 2);
@@ -2109,6 +3283,7 @@
     const used = (Number(t.normalSummons) || 0) >= 1;
     $('#fd-ns').innerHTML = 'Invocación Normal: <b class="' + (used ? 'ns-used' : 'ns-free') + '">' + (used ? 'usada' : 'disponible') + '</b>';
     $('#fd-strict').checked = strict();
+    renderAutoSwitch();
     $('#fd-log-btn').textContent = 'Registro (' + S.log.length + ')';
     // "Terminar intento": contra el rival o si el mazo tiene campo objetivo
     $('#fd-end').hidden = !(oppOn() || attemptTarget().length);
@@ -2249,12 +3424,15 @@
       const neg = l.negated;
       if (l.done) {
         return '<li class="' + (opp ? 'opp' : 'mine') + ' done' + (neg ? ' negated' : '') + '"><span class="cl">CL' + (i + 1) + '</span><span class="cl-body">'
-          + (opp ? '<span class="cl-who">Rival</span>' : '') + '<b>' + esc(nameById(l.id)) + '</b><span class="cl-done">Resuelto</span>'
-          + (!opp && !neg ? '<span class="cl-hint">Hazlo ahora en el campo</span>' : '') + '</span></li>';
+          + (opp ? '<span class="cl-who">Rival</span>' : '') + '<b>' + esc(nameById(l.id)) + '</b>' + (l.auto ? ' <span class="cl-auto">Auto</span>' : '') + '<span class="cl-done">Resuelto</span>'
+          + (!opp && !neg ? '<span class="cl-hint">' + (!l.auto ? 'Hazlo ahora en el campo' : !l.auto.ran ? 'Se está haciendo…'
+            : arr(l.auto.left).length ? 'Termina a mano lo que falta' : 'Hecho') + '</span>' : '') + '</span></li>';
       }
       return '<li class="' + (opp ? 'opp' : 'mine') + (neg ? ' negated' : '') + '"><span class="cl">CL' + (i + 1) + '</span><span class="cl-body">'
         + (opp ? '<span class="cl-who">Rival</span>' : '') + '<b>' + esc(nameById(l.id)) + '</b>'
         + (l.scale ? ' <span class="cl-fx">Escala</span>' : !opp && l.effectIndex ? ' <span class="cl-fx">efecto ' + l.effectIndex + '</span>' : '')
+        + (l.auto ? ' <span class="cl-auto" title="Se hace solo al resolverse (modo Automático)">Auto</span>' : '')
+        + (l.auto && arr(l.auto.targetLocs).length ? '<span class="cl-tgt">Objetivo: ' + esc(listEs(arr(l.auto.targetLocs).map((t) => q(nameById(t.id))))) + '</span>' : '')
         + (neg ? '<span class="cl-neg">' + (neg.fizzle ? 'Sin su carta' : 'Negado') + (neg.by ? ' · por ' + esc(byText(neg.by)) : '') + '</span>'
           + (opp ? '' : '<span class="cl-hint">' + (neg.fizzle ? 'Ya no puede usar la carta desterrada' : 'No hagas lo que dice este efecto') + '</span>') : '')
         + (l.text ? '<span class="cl-text">' + esc(l.text) + '</span>' : '') + '</span>'
@@ -2756,23 +3934,38 @@
     if (nb) { refuseRemove(how, name, noBanishText(nb)); return; }
     // Foto primero: "Deshacer" lo revierte (lo que haga el rival al dejar el campo también)
     snapshot();
+    const r = removeOppCardNow(uid, how, null);
+    if (!r.ok) {
+      history.pop();
+      refuseRemove(how, name, r.why);
+      return;
+    }
+    render();
+  }
+  /** Quita una carta del campo del rival sin ventanas ni foto (YGO.bot.removeFromField). by: 'CL1 «X»' si lo hace un
+   * eslabón automático; null: "por un efecto tuyo" (franja del rival). → { ok, why } */
+  function removeOppCardNow(uid, how, by) {
+    const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
+    if (!x) return { ok: false, why: 'Esa carta ya no está en el campo del rival.' };
+    const name = nameById(x.id);
+    const nb = how === 'banish' ? noBanish() : null;
+    if (nb) return { ok: false, why: noBanishText(nb) };
     const res = arr(botCall('removeFromField', [S, uid, how], null));
     // El rival lo rechaza (p. ej. Angelechy Bastion: las demás «Angelechy» no pueden ser destruidas): no cambia nada
     const no = res.find((n) => n && n.refused);
     if (no) {
-      history.pop();
       // El título ya dice "No se puede destruir · X": el texto empieza por el motivo
       const why = String(no.text || no.reason || 'El rival no permite este movimiento.').replace(/^«[^»]+» no se puede \S+:\s*/, '');
-      refuseRemove(how, name, why.charAt(0).toUpperCase() + why.slice(1));
-      return;
+      return { ok: false, why: why.charAt(0).toUpperCase() + why.slice(1) };
     }
     // Una sola línea: lo que dice el rival que pasó (género y destino reales), marcada como tuya
     const [first, ...rest] = res.filter((n) => n && typeof n === 'object');
-    const txt = first && first.text ? String(first.text).replace(/\.(\s|$)/, ' (por un efecto tuyo).$1').trim() : q(name) + ' del rival deja el campo (por un efecto tuyo).';
-    pushLog({ kind: 'manual', text: 'Movimiento manual: ' + txt });
+    const tag = ' (por ' + (by || 'un efecto tuyo') + ')';
+    const txt = first && first.text ? String(first.text).replace(/\.(\s|$)/, tag + '.$1').trim() : q(name) + ' del rival deja el campo' + tag + '.';
+    pushLog(by ? { kind: 'auto', text: txt } : { kind: 'manual', text: 'Movimiento manual: ' + txt });
     if (first && first.ops) oppNotes([{ ops: first.ops, by: first.by }]);
     oppNotes(rest);
-    render();
+    return { ok: true };
   }
 
   /* ---------- Nuevo duelo: turno, rival y lista de handtraps ---------- */
@@ -3151,7 +4344,7 @@
     $('#fd-shuffle').addEventListener('click', () => { snapshot(); game.shuffle(S.deck); toast('Mazo barajado'); render(); });
     $('#fd-search').addEventListener('click', () => openPile('deck'));
     $('#fd-undo').addEventListener('click', undo);
-    $('#fd-cancel').addEventListener('click', () => { pending = null; render(); });
+    $('#fd-cancel').addEventListener('click', () => { clearPending(false); render(); });
     $('#fd-confirm').addEventListener('click', confirmSummon);
     $('#fd-lp').addEventListener('change', (e) => {
       const lp = Number(e.target.value) || 0;
@@ -3170,6 +4363,7 @@
     $('#fd-next-phase').addEventListener('click', nextPhase);
     $('#fd-pass').addEventListener('click', passTurn);
     $('#fd-log-btn').addEventListener('click', openLog);
+    bindAutoSwitch();
     $('#fd-strict').addEventListener('change', (e) => {
       prefs.fieldStrict = e.target.checked;
       store.savePrefs(Object.assign(store.prefs(), { fieldStrict: prefs.fieldStrict }));
@@ -3230,7 +4424,11 @@
         move(uid, 'hand');
       }
     });
-    $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') { pileOpen = null; dialogOpen = false; } });
+    $('#modal').addEventListener('click', (e) => {
+      if (e.target.id !== 'modal') return;
+      pileOpen = null; dialogOpen = false;
+      if (document.body.dataset.mode === 'campo') fireDismiss();
+    });
     $('#modal-body').addEventListener('click', (e) => {
       const el = e.target.closest('[data-uid]');
       if (!el || !pileOpen) return;
@@ -3250,13 +4448,13 @@
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       escModal = !$('#modal').hidden;
-      if (escModal) { pileOpen = null; dialogOpen = false; }
+      if (escModal) { pileOpen = null; dialogOpen = false; if (document.body.dataset.mode === 'campo') fireDismiss(); }
     }, true);
     document.addEventListener('keydown', (e) => {
       if (document.body.dataset.mode !== 'campo' || e.target.matches('input, select, textarea')) return;
       if (e.key === 'Escape') {
         if (escModal) { escModal = false; return; }
-        pending = null; selected = null; render();
+        clearPending(false); selected = null; render();
         return;
       }
       if (!$('#modal').hidden) return;
@@ -3273,6 +4471,8 @@
       newDuel();
     } else render();
     renderDeckSelect();
+    // Una ventana del modo Automático que quedó esperando al cambiar de pantalla: cuenta como cerrada sin respuesta
+    if (dismissFn && $('#modal').hidden) fireDismiss();
     // La respuesta del rival al empezar (p. ej. desde la prueba de mano) se muestra ya en el campo
     if (oppQueued) showOpp(oppQueued);
   }

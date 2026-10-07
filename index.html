@@ -180,6 +180,9 @@
         </div>
         <p id="fd-ns" class="ns-state"></p>
         <label class="switch"><input id="fd-strict" type="checkbox"><span>Bloquear jugadas ilegales</span></label>
+        <div class="auto-wrap"><span class="auto-lbl" aria-hidden="true">Tus efectos:</span><div id="fd-auto" class="seg auto-seg" role="group" aria-label="Tus efectos: manual o automático">
+          <button type="button" data-auto="off" aria-pressed="true" title="Declaras el efecto y lo haces tú en el campo">Manual</button><button type="button" data-auto="on" aria-pressed="false" title="Al declarar paga el costo y elige objetivos; al resolver hace lo que dice el efecto (lo que no entienda te lo pide a mano)">Automático</button>
+        </div></div>
       </div>
       <div id="fd-opp" class="fd-opp" role="group" aria-label="Rival"></div>
       <div id="fd-pending" class="pending" hidden>
@@ -227,6 +230,7 @@
 <script src="js/online.js"></script>
 <script src="js/game.js"></script>
 <script src="js/rules.js"></script>
+<script src="js/effects.js"></script>
 <script src="js/bot.js"></script>
 <script src="js/deckbuilder.js"></script>
 <script src="js/handtest.js"></script>

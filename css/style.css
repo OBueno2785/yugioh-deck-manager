@@ -842,3 +842,42 @@ button.chip-x:hover:not(:disabled) { background: rgba(227, 89, 78, .2); color: #
   .st-table td { padding: 4px; }
   .st-table .st-pct { display: block; }
 }
+
+/* ---------- Modo Automático (tus efectos se hacen solos) ----------
+   Selector Manual / Automático en la barra del turno, marca "Auto" en la cadena, ventanas para elegir cartas
+   (costo, objetivo, búsqueda), zona y posición de la Invocación Especial, y la lista de lo que queda a mano. */
+.auto-wrap { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.auto-lbl { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.auto-seg { flex: none; }
+/* Posición de la Invocación Especial automática: los botones no se estiran ni dejan un hueco que parezca un botón */
+.ax-pos { align-self: flex-start; max-width: 100%; }
+.auto-seg button { padding: 4px 10px; font-size: 13px; }
+.auto-seg button[data-auto="on"][aria-pressed="true"] { color: var(--ok); box-shadow: inset 0 -2px 0 var(--ok); }
+.auto-seg button:disabled { opacity: .5; cursor: not-allowed; }
+.cl-auto {
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 3px; vertical-align: 1px;
+  border: 1px solid rgba(76, 197, 140, .55); color: var(--ok); font: 600 11px/15px var(--data); letter-spacing: .04em;
+}
+/* En la lista de la cadena (columna): la marca no se estira a todo el ancho */
+.cl-body > .cl-auto { align-self: flex-start; margin: 2px 0 0; }
+.cl-tgt { color: var(--fg); font-size: 12px; overflow-wrap: anywhere; }
+.log-e.k-auto { border-left-color: var(--ok); }
+.fx-src { margin: 0; color: var(--muted); font-size: 12.5px; font-style: italic; line-height: 1.4; overflow-wrap: anywhere; }
+.fx-left { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.ax-pick .slot-card { position: relative; border-radius: 4px; }
+.ax-pick .slot-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ax-pick .ax-opp .card { box-shadow: 0 0 0 2px var(--opp-line); }
+.ax-who, .ax-n {
+  position: absolute; z-index: 3; padding: 0 4px; border-radius: 3px; pointer-events: none; white-space: nowrap;
+  font: 700 10.5px/15px var(--data); letter-spacing: .03em; box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+}
+.ax-who { left: 3px; bottom: 3px; background: var(--panel); border: 1px solid var(--opp-line); color: var(--opp); text-transform: uppercase; }
+.ax-n { right: 3px; bottom: 3px; background: var(--accent); color: var(--accent-ink); }
+.ax-count { margin: 0; font: 600 13px var(--data); color: var(--accent); letter-spacing: .02em; }
+.ax-fixed { margin: 0; color: var(--fg); }
+#ax-zone { max-width: 100%; }
+@media (max-width: 599px) {
+  .fd-turn .auto-seg, .fd-turn .auto-wrap { order: 6; }
+  .auto-seg button { padding: 5px 9px; }
+  .ax-pick { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
+}

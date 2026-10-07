@@ -233,10 +233,13 @@
     archCache.set(k, code);
     return code;
   }
+  // El arquetipo en el nombre distingue mayúsculas ("HERO" no es "Heroic", "Xyz" no es "XYZ-Dragon Cannon"); los que no lo
+  // llevan tal cual ("Purrely" en «Epurrely Noir») entran por su código de arquetipo (setcode)
+  const caseKey = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\u201c\u201d\u2033]/g, '"').replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u2010-\u2015\u2212]/g, '-');
   function isArch(c, name) {
     if (!c) return false;
-    const k = db.norm(name);
-    if (c._name.includes(k)) return true;
+    if (caseKey(c.name).includes(caseKey(name))) return true;
     const d = c.desc || '';
     if (d.includes('always treated as a "' + name + '"') || d.includes('always treated as an "' + name + '"')) return true;
     const code = archCode(name);
@@ -1376,7 +1379,8 @@
     if (db.isExtra(c)) {
       const proper = c.type & T.SYNCHRO ? 'synchro' : c.type & T.XYZ ? 'xyz' : c.type & T.LINK ? 'link' : 'fusion';
       if (loc.area === 'extra' && !own && !faceUpInExtra(c, loc.inst) && !/Must (?:first )?be Special Summoned (?:with|by|from|\()/i.test(reqText)) {
-        warn(v, 'Desde el Extra Deck se invoca con su procedimiento (' + METHOD_LABELS[proper] + '); usa ese tipo si el efecto lo trata así.');
+        // "(this is treated as a Synchro Summon)": el modo Automático lo manda como 'special' con treatedAs
+        if (!req.treatedAs) warn(v, 'Desde el Extra Deck se invoca con su procedimiento (' + METHOD_LABELS[proper] + '); usa ese tipo si el efecto lo trata así.');
       } else if ((loc.area === 'gy' || loc.area === 'ban') && !ignores) {
         const m = properOf(loc.inst);
         if (!m) warn(v, 'Un monstruo del Extra Deck solo se revive si antes se invocó correctamente (' + METHOD_LABELS[proper] + ').');
@@ -1905,6 +1909,6 @@
     newTurnState, nextPhase, setPhase, passTurn, phaseName, turnLabel,
     effectsOf, parseMaterials, procedureOf, linkedZones, legalZones, locate,
     checkSummon, checkActivation, checkPlacement, checkPosition, checkSet, checkMove,
-    commitSummon, commitActivation, commitPosition, commitSet, addLock,
+    commitSummon, commitActivation, commitPosition, commitSet, addLock, isArch, isNamed,
   };
 })();
