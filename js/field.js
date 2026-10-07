@@ -126,8 +126,11 @@
   /** Movimiento manual (p. ej. del Mazo a la mano con Droll & Lock Bird activo). */
   const checkMove = (uid, dest, opts) => verdict(ask('checkMove', [S, uid, dest, opts || {}], () => localCheckMove(uid, dest)));
 
-  /** Sin YGO.rules.checkMove: solo el bloqueo de Droll & Lock Bird ("no se añaden cartas del Mazo a la mano"). */
+  /** Sin YGO.rules.checkMove: solo los bloqueos de Droll & Lock Bird ("no se añaden cartas del Mazo a la mano")
+   * y de Artifact Lancea ("nadie puede desterrar"). */
   function localCheckMove(uid, dest) {
+    const nb = dest === 'ban' ? noBanish() : null;
+    if (nb) return fail(noBanishText(nb));
     const loc = locate(uid);
     const lock = arr(S.turnState.locks).find((l) => l && l.kind === 'noDeckAdd');
     if (loc && loc.area === 'deck' && dest === 'hand' && lock) {
@@ -135,6 +138,8 @@
     }
     return PASS();
   }
+  /** ATK cambiado este turno por el rival (inst.atkSet = { atk, turn, by }, Multiplying Kuriboh!). */
+  const atkNow = (inst) => !!(inst && inst.atkSet && !inst.faceDown && inst.atkSet.turn === S.turnState.turn);
   /** Efectos negados este turno por el rival (inst.negated = { turn, by }). */
   const isNegated = (inst) => !!(inst && inst.negated && inst.negated.turn === S.turnState.turn);
   const byText = (by) => (!by ? '' : String(by).includes('«') ? String(by) : q(by));
@@ -151,6 +156,7 @@
     if (!c || !st.zones[zone]) return PASS();
     const errors = [];
     if (st.zones[zone].length) errors.push('Esa zona ya está ocupada.');
+    if (emzTaken(zone)) errors.push(takenText(emzTaken(zone)) + '.');
     if (zone === 'fz' && !(c.type & T.FIELD)) errors.push('La Zona de Campo es solo para Mágicas de Campo.');
     if (isMonsterZone(zone) && !db.isMonster(c)) errors.push('En esa zona solo van monstruos.');
     return { ok: !errors.length, errors, warnings: [] };
@@ -408,9 +414,7 @@
     const loc = locate(uid);
     if (!loc) return null;
     const [card] = loc.list.splice(loc.index, 1);
-    if (loc.area === 'field' && loc.index === 0 && loc.list.length) {
-      S.gy.push(...loc.list.splice(0).map(resetCard));
-    }
+    if (loc.area === 'field' && loc.index === 0 && loc.list.length) loc.list.splice(0).forEach(toGy);
     if (loc.area === 'deck') game.shuffle(S.deck);
     return { card, from: loc };
   }
@@ -423,10 +427,93 @@
     if (c.summonMethod && (!c.properSummon || c.properSummon === 'special')) c.properSummon = c.summonMethod;
     delete c.summonedTurn; delete c.summonMethod; delete c.setTurn; delete c.positionChangedTurn; delete c.extraFaceUp; delete c.level;
     delete c.negated; // la negación de Veiler o Impermanence es solo mientras está en el campo
+    delete c.atkSet; // el ATK cambiado por el rival (Multiplying Kuriboh!) también
     return c;
   };
   /** Vuelve a la mano, al mazo o boca abajo al Extra Deck: ya no cuenta cómo se invocó antes. */
   const forget = (c) => { delete c.properSummon; return c; };
+
+  /* ---------- Cartas del rival en tu campo y "al Cementerio → desterrada" ----------
+   * Contact "C" se Invoca en tu campo (inst.owner = 'opp', inst.oppUid = su uid en S.opp): cuando deja el campo o se
+   * desacopla vuelve a las pilas del rival (YGO.bot.returnCard), nunca a las tuyas. Con un bloqueo 'gyToBan' activo
+   * (Retaliating "C", Dimension Shifter) lo tuyo que iría al Cementerio queda desterrado, salvo que un bloqueo 'noBanish'
+   * (Artifact Lancea) impida desterrar. Lo desterrado así se anota una vez, al dibujar (flushRedirects). */
+  const isOppOwned = (inst) => !!(inst && inst.owner === 'opp');
+  let redirected = { names: [], by: '' };
+  let quietGy = null; // uid de la carta cuyo destierro ya anota quien llama (moveNow, la op 'destroy'): no se repite al dibujar
+  /** ¿Sigue activo el bloqueo? Retaliating "C" mientras esté en el campo del rival; Dimension Shifter hasta su turno until. */
+  function localLockOn(l) {
+    if (l.sourceUid) return arr(S.opp && S.opp.field).some((x) => x && x.uid === l.sourceUid && !x.faceDown);
+    if (l.until != null) return S.turnState.turn <= Number(l.until);
+    return true;
+  }
+  const lockOn = (l) => !!botCall('lockActive', [S, l], () => localLockOn(l));
+  const locksOf = (kind) => arr(S && S.turnState && S.turnState.locks).filter((l) => l && l.kind === kind && lockOn(l));
+  const noBanish = () => locksOf('noBanish')[0] || null;
+  const noBanishText = (l) => 'Por ' + q(l.source || 'Artifact Lancea') + ', este turno nadie puede desterrar cartas.';
+  /** Lo que iría al Cementerio queda desterrado (si Lancea no lo impide): { source } o null. Lo decide YGO.bot.gyRedirect. */
+  function gyToBan() {
+    const r = botCall('gyRedirect', [S], () => (noBanish() ? null : locksOf('gyToBan')[0] || null));
+    return r && typeof r === 'object' ? r : null;
+  }
+  /* Angelechy Opening to e4: Destrier ocupa una Zona de Monstruo Extra ({ kind: 'emzTaken', zone }) y Shatranga limita tus
+   * efectos de monstruo ({ kind: 'monsterEffectCap', max }); los dos mientras la carta siga en el campo del rival. */
+  const emzTaken = (z) => (EMZ.includes(z) && locksOf('emzTaken').find((l) => (l.zone || 'emz1') === z)) || null;
+  const takenText = (l) => 'Esa Zona de Monstruo Extra la ocupa ' + (l && l.source ? q(l.source) + ' del rival' : 'un monstruo del rival');
+  const capOf = (l) => (Number(l.max) > 0 ? Number(l.max) : 5);
+  /** Efectos de monstruo que intentaste activar este turno (los cuenta YGO.rules en turnState.acts; los de Péndulo no). */
+  function monsterActs() {
+    return arr(S.turnState.acts).filter((a) => {
+      if (!a || !a.monster) return false;
+      const c = db.get(a.id);
+      const e = c && effectsOf(c).find((x) => x.index === Number(a.effectIndex));
+      return !(e && e.pendulum);
+    }).length;
+  }
+  /** Carta del rival que ocupa la zona (su entrada en S.opp.field) o null. */
+  const takenBy = (l) => (l && arr(S.opp && S.opp.field).find((x) => x && x.uid === l.sourceUid)) || null;
+  /** Entradas del rival para el registro; las que traen ops (p. ej. el daño de Ghost Mourner) se aplican sin eslabón. */
+  function oppNotes(list) {
+    arr(list).forEach((n) => {
+      if (!n || typeof n !== 'object') return;
+      const ops = Array.isArray(n.ops) ? n.ops : [];
+      if (n.text) { const e = Object.assign({}, n, { kind: 'opp' }); delete e.ops; pushLog(e); }
+      if (ops.length) applyOppOps(ops, { handtrap: n.by || (ops.find((o) => o && o.by) || {}).by || 'Rival' });
+    });
+  }
+  /** Devuelve al rival su carta que estaba en tu campo (o era material). dest: 'gy' | 'ban' | 'hand' | 'deck'.
+   * fromField: dejó una Zona de Monstruo (no es un material desacoplado): Veidos mandado así a su Cementerio arma su efecto. */
+  function returnToOpp(inst, dest, fromField) {
+    const e = botCall('returnCard', [S, inst, dest, { fromField: !!fromField }], () => {
+      // Sin YGO.bot.returnCard: a la pila del rival tal cual (o a la tuya si no hay rival)
+      const pile = S.opp && Array.isArray(S.opp[dest]) ? S.opp[dest] : null;
+      if (pile) pile.push({ uid: inst.oppUid || inst.uid, id: inst.id });
+      else if (Array.isArray(S[dest])) { delete inst.owner; S[dest].push(resetCard(inst)); }
+      return null;
+    });
+    if (e && typeof e === 'object') oppNotes([e]);
+    return 'opp';
+  }
+  /** Una carta ya fuera de su lugar va al Cementerio: la tuya, con 'gyToBan' activo, queda desterrada; la del rival vuelve a él.
+   * Devuelve 'gy' | 'ban' | 'opp'. */
+  function toGy(card) {
+    if (isOppOwned(card)) return returnToOpp(card, 'gy');
+    resetCard(card);
+    const l = !card.token && gyToBan();
+    if (!l) { S.gy.push(card); return 'gy'; }
+    S.ban.push(card);
+    if (quietGy !== card.uid) {
+      redirected.names.push(q(nameById(card.id)));
+      redirected.by = l.source || 'el rival';
+    }
+    return 'ban';
+  }
+  function flushRedirects() {
+    const n = redirected.names;
+    if (!n.length || !S) return;
+    pushLog({ kind: 'opp', text: 'Por ' + byText(redirected.by) + ', ' + listEs(n) + (n.length > 1 ? ' quedan desterradas' : ' queda desterrada') + ' en vez de ir al Cementerio' });
+    redirected = { names: [], by: '' };
+  }
   /** Regla del Péndulo: un monstruo de Péndulo en el campo que iría al cementerio se coloca boca arriba en el Extra Deck,
    * como Monstruo o como Mágica (Escala, equipada o colocada boca abajo) y aunque esté boca abajo.
    * No cuentan los materiales Xyz ni las cartas cuya invocación o activación fue negada (opts.negated). */
@@ -453,7 +540,27 @@
       });
       return false;
     }
-    return moveNow(uid, dest, opts, null);
+    // Desterrar con Artifact Lancea activo: las reglas lo marcan
+    if (dest === 'ban' && noBanish()) {
+      const v = checkMove(uid, dest, opts);
+      gate(v, () => { if (moveNow(uid, dest, opts, v)) movedNotice(loc, uid, dest); });
+      return false;
+    }
+    // Del Cementerio, del destierro o boca arriba del Extra Deck a la mano: también es añadir (Hecahands Godos lo mira)
+    const from = loc.area;
+    const upExtra = from === 'extra' && !!loc.list[loc.index].extraFaceUp;
+    const done = moveNow(uid, dest, opts, null);
+    if (!done) return false;
+    if (dest === 'hand' && (from === 'gy' || from === 'ban' || upExtra) && S.hand.some((x) => x.uid === uid)) botEvent({ type: 'add', uids: [uid], from });
+    else movedNotice(loc, uid, dest);
+    return true;
+  }
+  /** Una carta del campo que se movió a mano: el rival solo lleva sus cuentas (p. ej. Ghost Mourner: ¿dejó el campo?),
+   * sin responder (observe sin consider). */
+  function movedNotice(loc, uid, dest) {
+    if (!oppOn() || !loc || loc.area !== 'field' || FIELD_ZONES.includes(dest)) return;
+    const notes = arr(botCall('observe', [S, { type: 'move', uids: [uid], from: fromKey(loc), to: dest }], []));
+    if (notes.length) { oppNotes(notes); render(); }
   }
   /** v: veredicto de checkMove (si la jugada fue ilegal, queda marcada en el registro). */
   function moveNow(uid, dest, opts, v) {
@@ -463,7 +570,7 @@
     // Una ficha que deja el campo desaparece
     if (loc.list[loc.index].token && !FIELD_ZONES.includes(dest)) {
       snapshot();
-      if (loc.area === 'field' && loc.index === 0) takeStack(uid).slice(1).forEach((m) => S.gy.push(resetCard(m)));
+      if (loc.area === 'field' && loc.index === 0) takeStack(uid).slice(1).forEach(toGy);
       else loc.list.splice(loc.index, 1);
       logManual(q(c.name) + ' deja el campo y desaparece');
       selected = null;
@@ -472,6 +579,7 @@
     }
     if (FIELD_ZONES.includes(dest)) {
       const target = S.zones[dest];
+      if (emzTaken(dest)) { toast(takenText(emzTaken(dest))); return false; }
       if (target.length && !opts.overlay && !opts.attach) { toast('Esa zona ya está ocupada'); return false; }
       if ((opts.overlay || opts.attach) && (!target.length || !isMonsterZone(dest))) { toast('Elige un monstruo en el campo'); return false; }
       if (target.length && target.some((x) => x.uid === uid)) return false;
@@ -487,6 +595,15 @@
     const { card } = stack ? { card: stack[0] } : detach(uid);
     const under = stack ? stack.slice(1) : [];
     let where = placeName(dest);
+    if (isOppOwned(card) && !FIELD_ZONES.includes(dest)) {
+      // Contact "C" (la Invocó el rival en tu campo): vuelve a la pila del rival
+      const to = dest === 'gy' || dest === 'ban' || dest === 'deck' ? dest : 'hand';
+      returnToOpp(card, to, loc.area === 'field' && loc.index === 0);
+      logManual(q(c.name) + ': ' + placeName(fromKey(loc)) + ' → ' + { gy: 'Cementerio', ban: 'Desterradas', deck: 'Mazo', hand: 'Mano' }[to] + ' del rival (es su carta)', v);
+      selected = null;
+      render();
+      return true;
+    }
     if (dest === 'hand') { S.hand.push(forget(resetCard(card))); }
     else if (dest === 'deck') {
       forget(resetCard(card));
@@ -515,11 +632,17 @@
       toast(PEND_TOAST);
     }
     else if (dest === 'gy' || dest === 'ban') {
-      resetCard(card);
       // Un Péndulo cuya invocación o activación fue negada sí va al cementerio
       if (opts.negated && dest === 'gy') where = 'Cementerio (invocación o activación negada)';
       // Las cartas del Extra Deck vuelven al Extra si se mandan a la mano o al mazo; al cementerio van normal
-      S[dest].push(card);
+      // (con Retaliating "C" o Dimension Shifter, desterradas)
+      if (dest === 'gy') {
+        quietGy = card.uid; // esta línea del registro ya lo dice
+        try {
+          if (toGy(card) === 'ban') { const l = gyToBan(); where = 'Desterradas (en vez del Cementerio' + (l && l.source ? ', por ' + byText(l.source) : '') + ')'; }
+        } finally { quietGy = null; }
+      }
+      else S.ban.push(resetCard(card));
     } else {
       // Dentro del campo conserva cómo se invocó; si entra desde fuera, entra sin declarar
       if (loc.area !== 'field') resetCard(card);
@@ -559,6 +682,8 @@
     S.hand.push(...cards);
     pushLog({ kind: 'draw', text: 'Roba ' + cards.map((x) => q(nameById(x.id))).join(', ') });
     render();
+    // Robar fuera de la Fase de Robo (por un efecto) es añadir a la mano: el rival lo ve (Droll & Lock Bird, Hecahands Godos)
+    if (S.turnState.phase !== 'draw') botEvent({ type: 'add', uids: cards.map((x) => x.uid), from: 'deck', draw: true });
   }
 
   /* ---------- Zonas posibles ---------- */
@@ -596,7 +721,7 @@
     const f = find(uid);
     if (!f) return null;
     const st = without(mats);
-    return legalZones(uid, mats, method, opts)[0] || zoneOrder(f.c, f.loc.area, method).find((z) => !st.zones[z].length) || null;
+    return legalZones(uid, mats, method, opts)[0] || zoneOrder(f.c, f.loc.area, method).find((z) => !st.zones[z].length && !emzTaken(z)) || null;
   }
   /** Zona automática de una invocación: la primera donde las reglas no ven errores
    * (p. ej. "a tu Zona de Monstruo central" de Elfnote Lucina); si no hay, la de autoZone. */
@@ -706,6 +831,8 @@
         v = merge(v, { warnings: [q(f.c.name) + ' no tiene un efecto que la invoque a sí misma: elige qué carta lo permite.'] });
       }
     }
+    const nb = req.matDest === 'ban' && (req.materials || []).length ? noBanish() : null;
+    if (nb) v = merge(v, fail(noBanishText(nb)));
     if (!req.zone) return merge(v, fail('No queda ninguna zona libre para esta carta.'));
     return merge(v, checkPlacement(without(req.materials), req.uid, req.zone, { method: req.method, faceDown: req.position === 'set' }));
   }
@@ -723,6 +850,8 @@
     const r = detach(uid);
     if (!r) return;
     if (r.card.token) return 'gone'; // una ficha (p. ej. material de un Link) desaparece
+    // Contact "C", Veidos: a la pila del rival (fromField si dejó la zona; un material desacoplado no)
+    if (isOppOwned(r.card)) return returnToOpp(r.card, dest === 'ban' ? 'ban' : dest === 'back' ? 'deck' : 'gy', r.from.area === 'field' && r.from.index === 0);
     const card = resetCard(r.card);
     const c = db.get(card.id);
     if (dest === 'gy' && pendulumToExtra(r.from, c)) {
@@ -737,7 +866,9 @@
       else { S.deck.push(card); game.shuffle(S.deck); }
       return;
     }
-    S[dest === 'ban' ? 'ban' : 'gy'].push(card);
+    if (dest === 'ban') { S.ban.push(card); return 'ban'; }
+    // Al Cementerio (o desterrada, con Retaliating "C" o Dimension Shifter): 'ban' si se desterró
+    return toGy(card) === 'ban' ? 'ban' : undefined;
   }
   /** Saca un monstruo del campo con todo lo que tiene debajo (para apilarlo como material Xyz). */
   function takeStack(uid) {
@@ -865,6 +996,7 @@
     if (p.method === 'pendulum') {
       if (stack.length) { toast('Elige monstruos de la mano o del Extra Deck (boca arriba)'); return; }
       if (!isMonsterZone(z)) { toast('Elige una Zona de Monstruo'); return; }
+      if (emzTaken(z)) { toast(takenText(emzTaken(z))); return; }
       const i = p.zones.indexOf(z);
       if (i >= 0) p.zones.splice(i, 1); else p.zones.push(z);
       render();
@@ -872,6 +1004,7 @@
     }
     if (stack.length) { togglePick(stack[0].uid); return; }
     if (!isMonsterZone(z)) { toast('Elige una Zona de Monstruo'); return; }
+    if (emzTaken(z)) { toast(takenText(emzTaken(z))); return; }
     p.zone = p.zone === z ? null : z;
     render();
   }
@@ -1320,19 +1453,26 @@
       return;
     }
     // Al cerrar la cadena, tus Mágicas/Trampas Normales activadas van al cementerio
-    const toGy = S.chain.filter((l) => {
+    const spells = S.chain.filter((l) => {
       const c = db.get(l.id);
       return l.owner !== 'opp' && l.cardAct && c && !db.isMonster(c) && !(c.type & (T.CONTINUOUS | T.FIELD | T.EQUIP));
     }).map((l) => l.uid);
-    const sent = [];
-    toGy.forEach((uid) => {
+    const sent = [], banned = [];
+    spells.forEach((uid) => {
       const loc = locate(uid);
       if (!loc || loc.area !== 'field' || loc.index !== 0 || loc.list[0].faceDown) return;
       const r = detach(uid);
-      S.gy.push(resetCard(r.card));
-      sent.push(q(nameById(r.card.id)));
+      quietGy = r.card.uid; // la línea de abajo ya dice si quedó desterrada (Retaliating "C", Dimension Shifter)
+      let went;
+      try { went = toGy(r.card); } finally { quietGy = null; }
+      (went === 'ban' ? banned : sent).push(q(nameById(r.card.id)));
     });
     if (sent.length) pushLog({ kind: 'resolve', text: 'Al cerrar la cadena van al cementerio: ' + sent.join(', ') });
+    if (banned.length) {
+      const by = (gyToBan() || {}).source;
+      pushLog({ kind: 'resolve', text: 'Al cerrar la cadena ' + (banned.length > 1 ? 'quedan desterradas' : 'queda desterrada') + ' en vez de ir al cementerio'
+        + (by ? ' (por ' + byText(by) + ')' : '') + ': ' + banned.join(', ') });
+    }
     const resolved = S.chain;
     S.chain = [];
     render();
@@ -1467,8 +1607,7 @@
       snapshot();
       // Eslabones del rival que quedan sin resolver: su carta deja la cadena sin hacer nada (no "te cortó")
       if (oppOn() && S.chain.some((l) => l && l.owner === 'opp' && !l.done)) {
-        arr(botCall('observe', [S, { type: 'resolved', abandoned: true, chain: JSON.parse(JSON.stringify(S.chain)) }], []))
-          .forEach((n) => { if (n && n.text) pushLog(Object.assign({}, n, { kind: 'opp' })); });
+        oppNotes(botCall('observe', [S, { type: 'resolved', abandoned: true, chain: JSON.parse(JSON.stringify(S.chain)) }], []));
       }
       pushLog({ kind: 'phase', text: 'Termina el turno ' + S.turnState.turn }, v);
       run('passTurn', [S], () => localPassTurn(S));
@@ -1605,7 +1744,7 @@
       const i = stack.indexOf(m);
       if (i < 1) return;
       stack.splice(i, 1);
-      S.gy.push(resetCard(m));
+      toGy(m); // un material del rival (Contact "C") vuelve a él
       pushLog({ kind: 'manual', text: 'Desacopla ' + q(nameById(m.id)) + ' de ' + q(nameById(host.id)) });
       render();
     };
@@ -1626,6 +1765,7 @@
     if (!f) return;
     const { loc, c } = f;
     if (zone === 'hand' || PILES.includes(zone)) { move(uid, zone, defaultOpts(uid, zone)); return; }
+    if (emzTaken(zone)) { toast(takenText(emzTaken(zone))); return; }
     const stack = S.zones[zone];
     if (stack.length && stack[0].uid === uid) return;
     const mon = db.isMonster(c);
@@ -1696,6 +1836,13 @@
 
   /** Toque/clic sobre una zona o pila del tablero. */
   function onZone(zone) {
+    // La Zona Extra que ocupa el rival (Angelechy Destrier): se ve su carta y, sin nada en curso, se puede quitar
+    const tk = emzTaken(zone);
+    if (tk && !S.zones[zone].length) {
+      if (pending || selected || !takenBy(tk)) toast(takenText(tk));
+      else openOppField(takenBy(tk).uid);
+      return;
+    }
     if (pending && pending.kind === 'summon') { pickZone(zone); return; }
     if (pending) {
       const { kind, uid } = pending;
@@ -1844,7 +1991,8 @@
     const cls = [inst.uid === selected ? 'sel' : '', inst.def ? 'is-def' : '', inst.faceDown && !reveal ? 'is-down' : '',
       p && p.picks.includes(inst.uid) ? 'pick' : '', p && p.method !== 'pendulum' && p.uid === inst.uid ? 'summoning' : ''].join(' ');
     const attrs = 'data-uid="' + inst.uid + '" draggable="true" tabindex="0"';
-    const html = inst.token ? tokenTile(c, attrs) : view.tile(c, { attrs });
+    // ATK cambiado por el rival (Multiplying Kuriboh!): la miniatura muestra el ATK de ahora
+    const html = inst.token ? tokenTile(c, attrs) : view.tile(c, Object.assign({ attrs }, atkNow(inst) ? { atk: inst.atkSet.atk } : {}));
     const cl = !inZone && chainTag(inst.uid);
     const hit = oppTargets(inst.uid);
     return '<div class="slot-card ' + cls + '">' + html + (inst.faceDown && !reveal ? '<span class="down-label">' + esc(c.name) + '</span>' : '')
@@ -1857,6 +2005,19 @@
     const mats = stack.length > 1 ? '<span class="mats" title="Materiales">' + (stack.length - 1) + '</span>' : '';
     const lv = stack.length && typeof stack[0].level === 'number' && !stack[0].faceDown ? '<span class="lv-badge" title="Nivel cambiado por un efecto">Nv ' + stack[0].level + '</span>' : '';
     const neg = stack.length && isNegated(stack[0]) ? '<span class="neg-badge" title="Efectos negados este turno (por ' + esc(byText(stack[0].negated.by)) + ')">Negado</span>' : '';
+    const atk = stack.length && atkNow(stack[0]) ? '<span class="atk-badge" title="ATK cambiado este turno (por ' + esc(byText(stack[0].atkSet.by)) + ')">ATK ' + stack[0].atkSet.atk + '</span>' : '';
+    const own = stack.length && isOppOwned(stack[0]) ? '<span class="own-badge" title="Carta del rival: vuelve a él cuando deja el campo">Rival</span>' : '';
+    // Zona Extra ocupada por el rival (Angelechy Destrier): su carta, que no es tuya (no es material ni se mueve)
+    const tk = !stack.length && emzTaken(z);
+    if (tk) {
+      const x = takenBy(tk);
+      const c = db.get(x ? x.id : idByName(tk.source || ''));
+      const name = c ? c.name : tk.source || 'Rival';
+      return '<div class="zone-slot z-' + z.replace(/\d/, '') + ' opp-taken" data-zone="' + z + '" tabindex="0" aria-label="' + esc(label + ': la ocupa ' + name + ' del rival') + '"'
+        + ' title="' + esc(tk.text || name + ' del rival ocupa esta zona') + '">'
+        + (c ? '<div class="slot-card">' + view.tile(c, { attrs: 'data-opptile="' + esc(x ? x.uid : '') + '"' }) + '</div>' : '<span class="zl">' + esc(name) + '</span>')
+        + '<span class="own-badge">Rival</span></div>';
+    }
     let target = false;
     const dest = ctx.dest.has(z);
     if (pending && pending.kind === 'summon') target = !stack.length && !dest && ctx.cands.has(z);
@@ -1868,7 +2029,7 @@
     const cl = stack.length ? chainTag(stack[0].uid) : '';
     return '<div class="zone-slot z-' + z.replace(/\d/, '') + (target ? ' target' : '') + (dest ? ' dest' : '') + (ctx.linked.has(z) ? ' linked' : '')
       + '" data-zone="' + z + '" tabindex="0" aria-label="' + label + '">'
-      + (stack.length ? tileFor(stack[0], false, true) + mats + lv + neg : '<span class="zl">' + (dest ? 'Destino' : label) + '</span>')
+      + (stack.length ? tileFor(stack[0], false, true) + mats + lv + neg + own + atk : '<span class="zl">' + (dest ? 'Destino' : label) + '</span>')
       + (stack.length && dest ? '<span class="dest-tag">Destino</span>' : '')
       + (cl ? '<span class="cl-badge">' + cl + '</span>' : '') + '</div>';
   }
@@ -1910,6 +2071,7 @@
   function render() {
     if (!S) return;
     ensureState();
+    flushRedirects();
     if (sweepTokens()) toast('Las fichas desaparecen cuando dejan el campo');
     if (pending && !locate(pending.uid)) pending = null;
     if (pending && pending.kind === 'summon') pending.picks = pending.picks.filter((u) => locate(u));
@@ -2166,6 +2328,8 @@
       : 'En ' + PILE_NAMES[loc.area].toLowerCase();
     if (loc.area === 'field' && !loc.index && inst.summonMethod && inst.summonedTurn === t.turn) where += ' · ' + (METHOD[inst.summonMethod] || 'Invocación') + ' este turno';
     if (loc.area === 'field' && isNegated(inst)) where += ' · Efectos negados (por ' + byText(inst.negated.by) + ')';
+    if (loc.area === 'field' && atkNow(inst)) where += ' · ATK ' + inst.atkSet.atk + ' (por ' + byText(inst.atkSet.by) + ')';
+    if (isOppOwned(inst)) where += ' · Carta del rival (vuelve a él)';
     $('#fd-detail').innerHTML = '<p class="fd-where">' + esc(where) + '</p>' + (inst.token ? tokenDetail(c) : view.detail(c));
     const acts = actionsFor(selected);
     $('#fd-actions').innerHTML = '<p class="fd-act-name">' + esc(c.name) + '</p><div class="fd-act-grid">'
@@ -2199,6 +2363,7 @@
   /** Lista de handtraps con al menos una copia ([{ name, copies }]); si no hay, la de fábrica. */
   function poolOf(pool) {
     const B = bot();
+    // (La lista de fábrica vieja guardada se cambia una sola vez, al cargar: ver migratePool. Lo que eliges después se respeta.)
     const known = (n) => !B || typeof B.isHandtrap !== 'function' || B.isHandtrap(n);
     const ok = arr(pool).filter((x) => x && x.name && known(String(x.name)) && Math.floor(Number(x.copies)) > 0)
       .map((x) => ({ name: String(x.name), copies: Math.floor(Number(x.copies)) }));
@@ -2233,7 +2398,7 @@
   function botEvent(ev) {
     if (!oppOn()) return null;
     const notes = arr(botCall('observe', [S, ev], []));
-    notes.forEach((n) => { if (n && n.text) pushLog(Object.assign({}, n, { kind: 'opp' })); });
+    oppNotes(notes);
     const r = S.turnState.mine && !pending ? botCall('consider', [S, ev], null) : null;
     if (!r || typeof r !== 'object') { if (notes.length) render(); return null; }
     const before = S.chain.length;
@@ -2307,16 +2472,95 @@
           f.inst.negated = { turn: S.turnState.turn, by: op.by || src };
           pushLog({ kind: 'opp', text: 'Los efectos de ' + q(f.c.name) + ' quedan negados este turno (por ' + by + ')' });
         } else if (op.op === 'destroy') {
+          // Un monstruo, una Mágica/Trampa (también colocada o una Escala) o la carta de la Zona de Campo (Typhoon, Veidos)
           const f = find(op.uid);
-          if (!f || f.loc.area !== 'field') return;
-          const went = leaveField(op.uid);
-          pushLog({ kind: 'opp', text: q(f.c.name) + ' es destruido (por ' + by + ')' + (went === 'extra' ? ': va boca arriba al Extra Deck' : went === 'gone' ? ' y desaparece' : '') });
+          if (!f || f.loc.area !== 'field' || f.loc.index !== 0) return;
+          const mon = isMonsterZone(f.loc.zone);
+          let went;
+          quietGy = op.uid; // esta línea del registro ya dice si quedó desterrada
+          try { went = leaveField(op.uid); } finally { quietGy = null; }
+          pushLog({ kind: 'opp', text: q(f.c.name) + (mon ? ' es destruido' : ' es destruida') + ' (por ' + by + ')' + (went === 'extra' ? ': va boca arriba al Extra Deck' : went === 'gone' ? ' y desaparece'
+            : went === 'opp' ? ': vuelve al rival (es su carta)' : went === 'ban' ? (mon ? ': queda desterrado' : ': queda desterrada') + ' en vez de ir al Cementerio' : '') });
           if (went === 'extra') toast(PEND_TOAST);
         } else if (op.op === 'banish') {
+          // De tu Cementerio (D.D. Crow, Bystial Magnamhut) o del campo (Dominus Spark: sus materiales Xyz van al Cementerio)
           const f = find(op.uid);
-          if (!f || f.loc.area !== 'gy') return;
-          S.ban.push(S.gy.splice(f.loc.index, 1)[0]);
-          pushLog({ kind: 'opp', text: q(f.c.name) + ' queda desterrada de tu Cementerio (por ' + by + ')' });
+          if (!f || !(f.loc.area === 'gy' || (f.loc.area === 'field' && f.loc.index === 0))) return;
+          const nb = noBanish();
+          if (nb) { pushLog({ kind: 'opp', text: q(f.c.name) + ' no se destierra (por ' + by + '): ' + noBanishText(nb) }); return; }
+          if (f.loc.area === 'gy') {
+            S.ban.push(S.gy.splice(f.loc.index, 1)[0]);
+            pushLog({ kind: 'opp', text: q(f.c.name) + ' queda desterrada de tu Cementerio (por ' + by + ')' });
+            return;
+          }
+          const went = banishFromField(op.uid);
+          pushLog({ kind: 'opp', text: q(f.c.name) + (went === 'gone' ? ' deja el campo y desaparece' : went === 'opp' ? ' queda desterrada en el destierro del rival (es su carta)'
+            : ' queda desterrada de tu campo') + ' (por ' + by + ')' });
+        } else if (op.op === 'bounce') {
+          // Shiina, Dominus Spiral: a la mano de su dueño; los del Extra Deck vuelven al Extra Deck
+          const out = [];
+          arr(op.uids).forEach((u) => {
+            const f = find(u);
+            if (!f || f.loc.area !== 'field' || f.loc.index !== 0) return;
+            const went = bounceCard(u);
+            out.push(q(f.c.name) + (went === 'extra' ? ' (al Extra Deck)' : went === 'gone' ? ' (desaparece)' : went === 'opp' ? ' (a la mano del rival)' : ''));
+          });
+          pushLog({ kind: 'opp', text: out.length ? 'Vuelven a la mano (por ' + by + '): ' + listEs(out) : 'No hay cartas que devolver a la mano (' + by + ')' });
+        } else if (op.op === 'banishExtra') {
+          // Ghost Reaper & Winter Cherries: todas las copias de esa carta de tu Extra Deck
+          const id = Number(op.id);
+          const nb = noBanish();
+          if (nb) { pushLog({ kind: 'opp', text: q(nameById(id)) + ' no se destierra de tu Extra Deck (por ' + by + '): ' + noBanishText(nb) }); return; }
+          const out = S.extra.filter((x) => Number(x.id) === id);
+          S.extra = S.extra.filter((x) => Number(x.id) !== id);
+          out.forEach((x) => S.ban.push(forget(resetCard(x))));
+          pushLog({ kind: 'opp', text: out.length ? nOf(out.length, 'copia') + ' de ' + q(nameById(id)) + ' de tu Extra Deck ' + (out.length > 1 ? 'quedan desterradas' : 'queda desterrada') + ' (por ' + by + ')'
+            : 'No hay copias de ' + q(nameById(id)) + ' en tu Extra Deck (' + by + ')' });
+        } else if (op.op === 'steal') {
+          // Hecahands Godos: un monstruo de tu Cementerio pasa al campo del rival (YGO.bot.takeControl)
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'gy') { pushLog({ kind: 'opp', text: by + ' no hace nada: esa carta ya no está en tu Cementerio.' }); return; }
+          if (!bot() || typeof bot().takeControl !== 'function') return;
+          const [card] = S.gy.splice(f.loc.index, 1);
+          const e = botCall('takeControl', [S, resetCard(card), op.by || src], null);
+          if (!arr(S.opp && S.opp.field).some((x) => x && x.uid === card.uid)) { S.gy.splice(f.loc.index, 0, card); return; }
+          if (e && typeof e === 'object' && e.text) oppNotes([e]);
+          else pushLog({ kind: 'opp', text: 'El rival Invoca ' + q(f.c.name) + ' de tu Cementerio a su campo (por ' + by + '); queda desterrada cuando deja el campo' });
+        } else if (op.op === 'giveMonster') {
+          // Contact "C": el rival la Invoca en tu campo, en DEF (sigue siendo su carta)
+          const id = Number(op.id);
+          const c = db.get(id);
+          const zone = firstEmpty(MZ);
+          if (!c || !zone) {
+            pushLog({ kind: 'opp', text: 'No queda una Zona de Monstruo libre en tu campo para ' + q(c ? c.name : nameById(id)) + ': vuelve a la mano del rival' });
+            returnToOpp({ id, uid: op.uid }, 'hand');
+            return;
+          }
+          const inst = Object.assign(game.instance(id), { owner: 'opp', oppUid: op.uid, faceDown: false, def: op.position !== 'atk', summonedTurn: S.turnState.turn, summonMethod: 'special' });
+          S.zones[zone].push(inst);
+          pushLog({ kind: 'opp', text: 'El rival Invoca ' + q(c.name) + ' en tu ' + placeName(zone) + (inst.def ? ', en DEF' : '') + ' (por ' + by + ')' });
+        } else if (op.op === 'setAtk') {
+          // Multiplying Kuriboh!: el ATK cambia hasta el final del turno (se ve en la carta)
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'field' || f.loc.index !== 0) return;
+          const atk = Math.max(0, Math.round(Number(op.atk) || 0));
+          f.inst.atkSet = { atk, turn: S.turnState.turn, by: op.by || src };
+          pushLog({ kind: 'opp', text: 'El ATK de ' + q(f.c.name) + ' pasa a ' + atk + ' (por ' + by + ')' });
+        } else if (op.op === 'damage') {
+          const n = Math.max(0, Math.round(Number(op.amount) || 0));
+          const before = Number(S.lp) || 0;
+          S.lp = Math.max(0, before - n);
+          pushLog({ kind: 'opp', text: 'Recibes ' + n + ' de daño (por ' + by + '): LP ' + before + ' → ' + S.lp });
+        } else if (op.op === 'returnOwned' && op.card && typeof op.card === 'object') {
+          // Tu carta que el rival tenía en su campo (Hecahands Godos) vuelve a ti
+          const card = JSON.parse(JSON.stringify(op.card));
+          delete card.owner;
+          const went = putOwned(card, op.dest);
+          // La nota del rival solo dice que deja su campo: a dónde va lo dice esta línea
+          const o = db.isMonster(db.get(card.id) || { type: 0 }) ? 'o' : 'a';
+          // "(por X)" solo al desterrarla: es por la carta que se la llevó ("banish it when it leaves the field") o por un reemplazo
+          pushLog({ kind: 'opp', text: q(nameById(card.id)) + ' ' + ({ gy: 'va a tu Cementerio', ban: 'queda desterrad' + o, hand: 'vuelve a tu mano', deck: 'vuelve a tu Mazo', extra: 'vuelve a tu Extra Deck' }[went] || 'vuelve a ti')
+            + (went === 'ban' ? ' (por ' + by + ')' : '') });
         } else if (op.op === 'tributeAll') tributed = tributeAll(by, op.uids);
         else if (op.op === 'token') { placeToken(op, tributed, by); token = op.name || 'Primal Being Token'; }
         else if (op.op === 'lock' && op.lock) {
@@ -2331,11 +2575,50 @@
       } catch (err) { console.warn('No se pudo aplicar el efecto del rival', op, err); }
     });
   }
+  /** Desterrada del campo por el rival: sus materiales Xyz van al Cementerio. Devuelve 'ban' | 'gone' (ficha) | 'opp' (era del rival). */
+  function banishFromField(uid) {
+    const [top, ...under] = takeStack(uid);
+    under.forEach(toGy);
+    if (!top || top.token) return 'gone';
+    if (isOppOwned(top)) return returnToOpp(top, 'ban', true);
+    S.ban.push(resetCard(top));
+    return 'ban';
+  }
+  /** A la mano de su dueño por el rival: 'hand' | 'extra' (Extra Deck; boca arriba si es Péndulo) | 'gone' (ficha) | 'opp'. */
+  function bounceCard(uid) {
+    const [top, ...under] = takeStack(uid);
+    under.forEach(toGy);
+    if (!top || top.token) return 'gone';
+    if (isOppOwned(top)) return returnToOpp(top, 'hand', true);
+    const c = cardOf(top);
+    resetCard(top);
+    if (c && db.isExtra(c)) {
+      if (c.type & T.PENDULUM) top.extraFaceUp = true; else forget(top);
+      S.extra.push(top);
+      return 'extra';
+    }
+    S.hand.push(forget(top));
+    return 'hand';
+  }
+  /** Tu carta vuelve del campo del rival a una pila tuya. dest: 'gy' | 'ban' | 'hand' | 'deck'. Devuelve a dónde fue. */
+  function putOwned(card, dest) {
+    const c = db.get(card.id);
+    resetCard(card);
+    if (dest === 'gy') return toGy(card);
+    if (dest === 'hand' || dest === 'deck') {
+      forget(card);
+      if (c && db.isExtra(c)) { S.extra.push(card); return 'extra'; }
+      if (dest === 'hand') S.hand.push(card); else { S.deck.push(card); game.shuffle(S.deck); }
+      return dest;
+    }
+    S.ban.push(card);
+    return 'ban';
+  }
   /** Una carta deja el campo por un efecto del rival: las fichas desaparecen; los Péndulo van boca arriba al Extra Deck. */
   function leaveField(uid) {
     const f = find(uid);
     if (!f) return null;
-    if (f.inst.token) { takeStack(uid).slice(1).forEach((m) => S.gy.push(resetCard(m))); return 'gone'; }
+    if (f.inst.token) { takeStack(uid).slice(1).forEach(toGy); return 'gone'; }
     return sendMaterial(uid, 'gy') || 'gy';
   }
   /** Nibiru: se sacrifican todos los monstruos boca arriba de tu campo (o los de uids, si el rival los dice).
@@ -2413,9 +2696,24 @@
       const on = h.on || (typeof h.target === 'string' ? h.target : '');
       return chip(idByName(h.name), 'used' + (h.negated ? ' neg' : ''), h.name + (on ? ' → ' + on : '') + (h.negated ? ' (negada)' : ''));
     }).join('');
-    const field = arr(o.field).map((x) => chip(x && x.id)).join('');
-    const locks = arr(S.turnState.locks).filter((l) => l && l.kind === 'noDeckAdd')
-      .map((l) => '<span class="opp-lock" title="' + esc(l.text || '') + '">' + esc(shortName(l.source || 'Droll & Lock Bird')) + ': no añades del Mazo</span>').join('');
+    // Sus cartas en el campo (Kuriboh, Shiina, Gamma, el tuyo que se llevó con Godos, las Angelechy...): al tocarlas se pueden
+    // quitar del campo cuando un efecto tuyo lo hace; sus Trampas mientras están en la cadena, como antes
+    const fieldChip = (x) => '<button type="button" class="opp-chip opp-mon' + (x.owner === 'player' ? ' mine' : '') + '" data-oppfield="' + esc(x.uid) + '" title="'
+      + esc(nameById(x.id) + (x.def ? ' · en DEF' : '') + (x.owner === 'player' ? ' · es tu carta' : '') + ' · tócala si un efecto tuyo la quita del campo') + '">'
+      + esc(shortName(nameById(x.id))) + (x.def ? ' <span class="opp-def">DEF</span>' : '') + '</button>';
+    const field = arr(o.field).filter(Boolean).map((x) => (x.onChain ? chip(x.id) : fieldChip(x))).join('');
+    const lockChip = (l, text) => '<span class="opp-lock" title="' + esc(l.text || '') + '">' + esc(text) + '</span>';
+    const nb = noBanish();
+    const short = (l, dflt) => shortName(l.source || dflt).replace(/^Angelechy /, '');
+    const locks = arr(S.turnState.locks).filter(Boolean).map((l) => {
+      if (l.kind === 'noDeckAdd') return lockChip(l, short(l, 'Droll & Lock Bird') + ': no añades del Mazo');
+      if (l.kind === 'noBanish' && l === nb) return lockChip(l, short(l, 'Artifact Lancea') + ': nadie destierra');
+      if (!lockOn(l)) return '';
+      if (l.kind === 'gyToBan') return lockChip(l, short(l, 'Rival') + ': Cementerio → desterradas' + (nb ? ' (Lancea lo impide)' : ''));
+      if (l.kind === 'monsterEffectCap') return lockChip(l, short(l, 'Angelechy Shatranga') + ': efectos de monstruo ' + Math.min(monsterActs(), capOf(l)) + '/' + capOf(l));
+      if (l.kind === 'emzTaken') return lockChip(l, short(l, 'Angelechy Destrier') + ': ocupa tu ' + placeName(l.zone || 'emz1'));
+      return '';
+    }).join('');
     box.className = 'fd-opp';
     box.innerHTML = '<span class="opp-tag">Rival</span><span class="opp-mode">' + (o.mode === 'aggressive' ? 'Agresivo' : 'Inteligente') + '</span>'
       + '<span class="opp-group opp-hand" aria-label="Mano del rival: ' + hand.length + ' cartas"><span class="opp-label">Mano</span>' + handHtml
@@ -2428,6 +2726,53 @@
   function showCard(id) {
     const c = db.get(id);
     if (c) openDialog(c.name, '<div class="modal-detail">' + view.detail(c) + '</div>', [{ label: 'Cerrar', kind: 'primary' }]);
+  }
+  /** Un monstruo del campo del rival: si un efecto tuyo lo destruye, destierra o devuelve a la mano, se lo dices aquí
+   * (YGO.bot.removeFromField). Queda en el registro y "Deshacer" lo revierte. */
+  function openOppField(uid) {
+    const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
+    if (!x) return;
+    const name = nameById(x.id);
+    const can = !!(bot() && typeof bot().removeFromField === 'function');
+    const xc = db.get(x.id);
+    const items = can ? [
+      { label: 'Destruir', kind: 'primary', action: () => removeOppCard(uid, 'destroy') },
+      { label: 'Desterrar', action: () => removeOppCard(uid, 'banish') },
+      // Un monstruo del Extra Deck (Angelechy Destrier, también los Angelechy como Mágicas Continuas) vuelve a ese Extra Deck
+      { label: xc && db.isExtra(xc) ? 'Devolver al Extra Deck' : 'Devolver a la mano', action: () => removeOppCard(uid, 'hand') },
+    ] : [];
+    if (db.get(x.id)) items.push({ label: 'Ver la carta', kind: 'link-btn', action: () => showCard(x.id) });
+    chooser('Campo del rival · ' + name, (x.def ? 'En DEF. ' : '') + (x.owner === 'player' ? 'Es tu carta: si deja el campo, queda desterrada. ' : '')
+      + (can ? 'Si un efecto tuyo la quita del campo, elige qué le pasa.' : 'El rival no puede quitarla del campo en esta versión.'), items);
+  }
+  const REMOVE_TITLE = { destroy: 'No se puede destruir', banish: 'No se puede desterrar', hand: 'No vuelve a la mano' };
+  const refuseRemove = (how, name, why) => openDialog(REMOVE_TITLE[how] + ' · ' + name, '<p class="hint">' + esc(why) + '</p>', [{ label: 'Entendido', kind: 'primary' }]);
+  function removeOppCard(uid, how) {
+    const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
+    if (!x) return;
+    const name = nameById(x.id);
+    // Con «Artifact Lancea» nadie destierra: tu efecto tampoco (no cambia nada)
+    const nb = how === 'banish' ? noBanish() : null;
+    if (nb) { refuseRemove(how, name, noBanishText(nb)); return; }
+    // Foto primero: "Deshacer" lo revierte (lo que haga el rival al dejar el campo también)
+    snapshot();
+    const res = arr(botCall('removeFromField', [S, uid, how], null));
+    // El rival lo rechaza (p. ej. Angelechy Bastion: las demás «Angelechy» no pueden ser destruidas): no cambia nada
+    const no = res.find((n) => n && n.refused);
+    if (no) {
+      history.pop();
+      // El título ya dice "No se puede destruir · X": el texto empieza por el motivo
+      const why = String(no.text || no.reason || 'El rival no permite este movimiento.').replace(/^«[^»]+» no se puede \S+:\s*/, '');
+      refuseRemove(how, name, why.charAt(0).toUpperCase() + why.slice(1));
+      return;
+    }
+    // Una sola línea: lo que dice el rival que pasó (género y destino reales), marcada como tuya
+    const [first, ...rest] = res.filter((n) => n && typeof n === 'object');
+    const txt = first && first.text ? String(first.text).replace(/\.(\s|$)/, ' (por un efecto tuyo).$1').trim() : q(name) + ' del rival deja el campo (por un efecto tuyo).';
+    pushLog({ kind: 'manual', text: 'Movimiento manual: ' + txt });
+    if (first && first.ops) oppNotes([{ ops: first.ops, by: first.by }]);
+    oppNotes(rest);
+    render();
   }
 
   /* ---------- Nuevo duelo: turno, rival y lista de handtraps ---------- */
@@ -2473,7 +2818,7 @@
       $('#su-mode-note', root).textContent = st.mode === 'aggressive' ? 'Usa cada handtrap en el primer momento legal.'
         : 'Guarda sus handtraps para el golpe más dañino (tus starters ★), sin dejar pasar todo tu turno.';
       const copies = st.pool.reduce((s, x) => s + x.copies, 0);
-      $('#su-pool-sum', root).textContent = 'Lista: ' + nOf(st.pool.length, 'carta') + ' · ' + nOf(copies, 'copia') + '.';
+      $('#su-pool-sum', root).textContent = 'Lista: ' + nOf(st.pool.filter((x) => x.copies > 0).length, 'carta') + ' · ' + nOf(copies, 'copia') + '.';
     };
     root.querySelectorAll('[data-second], [data-count], [data-mode]').forEach((b) => b.addEventListener('click', () => {
       if (b.dataset.second) st.second = b.dataset.second === '1';
@@ -2495,6 +2840,8 @@
     else newDuel(null, null, { second: st.second, bot: bot0 });
     renderDeckSelect();
   }
+  // Nombre con que Oscar conoce la carta (se ve junto al de la base)
+  const POOL_ALIAS = { 'Multiplying Kuriboh!': 'Kuriboh - Multiply!' };
   /** Lista de handtraps del rival: copias de 0 al máximo de la banlist TCG. */
   function openPool(st, back) {
     const H = HT();
@@ -2505,15 +2852,24 @@
       return { name: n, copies: Math.min(max, cur.get(n) || 0), max };
     });
     const total = () => draft.reduce((s, x) => s + x.copies, 0);
-    const row = (x, i) => '<div class="pool-row"><div class="pool-info"><b class="pool-name">' + esc(x.name) + '</b>'
-      + (H[x.name].what ? '<span class="hint">' + esc(H[x.name].what) + '</span>' : '')
-      + (x.max < 3 ? '<span class="pool-lim">' + (x.max === 2 ? 'Semilimitada: máx. 2' : x.max === 1 ? 'Limitada: máx. 1' : 'Prohibida') + '</span>' : '') + '</div>'
+    // Solo OCG (ot 1): no está en la banlist TCG; el alias es el nombre con que Oscar la conoce
+    const tags = (x) => {
+      const c = db.get(idByName(x.name));
+      const alias = POOL_ALIAS[x.name] || (H[x.name] && typeof H[x.name].alias === 'string' ? H[x.name].alias : '');
+      return (alias && !x.name.startsWith(alias) ? ' <span class="pool-alias">(' + esc(q(alias)) + ')</span>' : '')
+        + (c && Number(c.ot) === 1 ? '<span class="pool-tag">Solo OCG</span>' : '')
+        + (x.max < 3 ? '<span class="pool-lim">' + (x.max === 2 ? 'Semilimitada: máx. 2' : x.max === 1 ? 'Limitada: máx. 1' : 'Prohibida') + '</span>' : '');
+    };
+    const row = (x, i) => '<div class="pool-row"><div class="pool-info"><span class="pool-head"><b class="pool-name">' + esc(x.name) + '</b>' + tags(x) + '</span>'
+      // En el teléfono la descripción se corta a 2 líneas: tocarla la muestra entera (y el title la tiene completa)
+      + (H[x.name].what ? '<span class="hint pool-what" role="button" tabindex="0" aria-expanded="false" title="' + esc(H[x.name].what) + '">' + esc(H[x.name].what) + '</span>' : '') + '</div>'
       + '<div class="stepper"><button type="button" data-pool="' + i + '" data-d="-1" aria-label="Quitar una copia">−</button><b id="pool-n' + i + '">' + x.copies
       + '</b><button type="button" data-pool="' + i + '" data-d="1" aria-label="Agregar una copia">+</button></div></div>';
     const need = st.count === 3 || st.count === '2-3' ? 3 : 2; // las que puede robar el rival
     const totalText = () => 'Total: ' + nOf(total(), 'copia') + (!total() ? ' · pon al menos 1 copia'
       : total() < need ? ' · pon al menos ' + need + ' para que el rival pueda tener ' + need + ' handtraps' : '');
-    openDialog('Lista de handtraps', '<p class="hint">El rival roba sus handtraps al azar de esta lista (respeta la banlist TCG).</p>'
+    openDialog('Lista de handtraps', '<p class="hint">El rival roba sus handtraps al azar de esta lista (respeta la banlist TCG). Son '
+      + nOf(draft.length, 'carta') + (draft.length > 8 ? ': desliza la lista para verlas todas' : '') + '.</p>'
       + '<div class="pool-list">' + draft.map(row).join('') + '</div><p class="pool-total" id="pool-total">' + esc(totalText()) + '</p>', [
       { label: 'Restablecer', kind: 'link-btn', action: () => { st.pool = poolOf(null); openPool(st, back); } },
       { label: 'Cancelar', action: back },
@@ -2531,6 +2887,11 @@
       $('#pool-total', root).classList.toggle('bad', !total());
       if (done) done.disabled = !total();
     };
+    $$('.pool-what', root).forEach((w) => {
+      const flip = () => { const open = w.classList.toggle('open'); w.setAttribute('aria-expanded', String(open)); };
+      w.addEventListener('click', flip);
+      w.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
+    });
     $$('[data-pool]', root).forEach((b) => b.addEventListener('click', () => {
       const x = draft[Number(b.dataset.pool)];
       x.copies = Math.max(0, Math.min(x.max, x.copies + Number(b.dataset.d)));
@@ -2567,7 +2928,8 @@
   const attemptTarget = () => (d ? arr(aCall('target', [d.id], [])) : []);
   const attemptStats = () => (d ? aCall('stats', [d.id], null) : null);
   /** Nombres de las cartas en tu campo (las de encima de cada zona). */
-  const boardNames = () => FIELD_ZONES.map((z) => S.zones[z][0]).filter(Boolean).map((x) => cardOf(x)).filter(Boolean).map((c) => c.name);
+  // (sin las cartas del rival que estén en tu campo, como Contact "C": no son parte de tu combo)
+  const boardNames = () => FIELD_ZONES.map((z) => S.zones[z][0]).filter((x) => x && !isOppOwned(x)).map((x) => cardOf(x)).filter(Boolean).map((c) => c.name);
 
   function endAttempt() {
     if (!S || !d) return;
@@ -2776,9 +3138,10 @@
     $('#fd-end').addEventListener('click', () => endAttempt());
     // Franja del rival: ver su mano, sus cartas, intentos y la ventana de Nuevo duelo
     $('#fd-opp').addEventListener('click', (e) => {
-      const b = e.target.closest('[data-opp], [data-oppcard]');
+      const b = e.target.closest('[data-opp], [data-oppcard], [data-oppfield]');
       if (!b) return;
       if (b.dataset.oppcard) { showCard(Number(b.dataset.oppcard)); return; }
+      if (b.dataset.oppfield) { openOppField(b.dataset.oppfield); return; }
       const k = b.dataset.opp;
       if (k === 'reveal') { revealed[S.duelId] = !revealed[S.duelId]; renderOpp(); }
       else if (k === 'setup') openSetup({ wantBot: true });
@@ -2925,6 +3288,17 @@
   }
 
   bind();
+  migratePool();
+  /** Una sola vez por versión de la lista de fábrica (botPoolVer = cuántas trae): quien tenía guardada tal cual una lista de
+   * fábrica vieja (las 10 del principio o las 33) pasa a la nueva. Si después eliges a propósito una lista igual, se respeta. */
+  function migratePool() {
+    const ver = arr(bot() && bot().DEFAULT_POOL).length;
+    if (!ver || Number(store.prefs().botPoolVer) === ver) return;
+    if (prefs.botPool && botCall('isOldDefaultPool', [prefs.botPool], false)) savePref({ botPool: null, botPoolVer: ver });
+    else savePref({ botPoolVer: ver });
+  }
   // state(): copia del estado actual (solo lectura; la usan las pruebas de tools/test_field.js)
-  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null) };
+  // testOps(ops, by): aplica ops del rival como si vinieran de un efecto suyo, con foto para "Deshacer" (solo para las pruebas)
+  const testOps = (ops, by) => { if (!S) return; snapshot(); applyOppOps(arr(ops), { handtrap: by || 'Rival' }); render(); };
+  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps };
 })();

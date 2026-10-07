@@ -68,6 +68,7 @@
   const raceName = (bit) => (db.RACES.find((r) => r[0] === bit) || [0, ''])[1];
   const phaseName = (k) => (PHASES.find((p) => p[0] === k) || [k, k])[1];
   const q = (name) => '«' + name + '»';
+  const CONTACT_C = 87170768; // Contact "C": quien la controla solo Invoca por Fusión/Sincronía/Xyz/Link con ella como material
   const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // Ritual por ATK ("Tribute ... whose total ATK equal or exceed the ATK of the Ritual Monster")
   const RITUAL_ATK = /\b(?:total|combined) ATK\b[^.]*\bRitual\b|\bRitual\b[^.]*\b(?:total|combined) ATK\b/i;
@@ -121,7 +122,9 @@
     t.normalSummons = 0;
     t.pendulumSummons = 0;
     t.opt = {};
-    t.locks = [];
+    // Siguen los bloqueos del rival que no son "este turno": los de una carta suya que sigue en su campo (sourceUid:
+    // Retaliating "C", Angelechy Shatranga, Angelechy Destrier; ver lockLive) y los que tienen turno final (until: Dimension Shifter)
+    t.locks = (Array.isArray(t.locks) ? t.locks : []).filter((l) => l && l.kind && (l.sourceUid || (l.until != null && Number(l.until) >= t.turn)));
     t.specials = [];
     t.acts = [];
     S.chain = [];
@@ -917,6 +920,9 @@
     }
     const fromExtra = from === 'extra';
     const linked = linkedZones(S, [...vac, uid]);
+    // Un monstruo del rival en esa Zona Extra (Angelechy Destrier): no es tuya mientras siga ahí
+    const tk = EMZ.includes(zone) ? emzTakenLock(S, zone) : null;
+    if (tk) err(v, 'Esa Zona de Monstruo Extra la ocupa ' + q(tk.source || 'un monstruo del rival') + ' del rival.');
     if (EMZ.includes(zone)) {
       if (!fromExtra) {
         if (from === 'field' || from === 'material') warn(v, 'Solo un efecto puede mover un monstruo a la Zona de Monstruo Extra.');
@@ -1085,6 +1091,14 @@
     const reqText = a.reqs.join(' ');
     const desc = c.desc || '';
     const xs = materialsOf(S, req, v);
+    // Contact "C" boca arriba en tu campo (la Invoca el rival): sin ella como material no hay Fusión, Sincronía, Xyz ni Link
+    if (['fusion', 'synchro', 'xyz', 'link'].includes(method)) {
+      // Cada copia boca arriba pone su propia restricción: todas tienen que ser materiales
+      const ccs = MON_ZONES.map((z) => topOf(S, z)).filter((i) => i && !i.faceDown && Number(i.id) === CONTACT_C);
+      const missing = ccs.filter((i) => !(req.materials || []).includes(i.uid)).length;
+      if (missing) err(v, 'Por «Contact "C"» solo puedes invocar por Fusión, Sincronía, Xyz o Link usándola como material'
+        + (ccs.length > 1 ? ' (tienen que ser materiales las ' + ccs.length + ' que hay en tu campo).' : '.'));
+    }
     const vacating = xs.filter(onField).map((x) => x.uid);
     const fromExtra = loc.area === 'extra';
     // Un monstruo boca arriba en la Zona de Péndulo sí puede invocarse desde ahí (lo dice el efecto que lo permite)
@@ -1520,7 +1534,24 @@
     }
     // "You can only activate 1 other "Mulcharmy" monster effect, the turn you activate this effect"
     if (db.isMonster(c) && idx > 0) archLimits(v, t, c, e);
+    // Angelechy Shatranga en el campo del rival: "your opponent can only attempt to activate up to 5 monster effects per turn"
+    if (db.isMonster(c) && idx > 0 && !e.pendulum) {
+      const n = monsterActs(t);
+      for (const l of liveLocks(S, 'monsterEffectCap')) {
+        const max = Number(l.max) > 0 ? Number(l.max) : 5;
+        if (n >= max) { err(v, 'Por ' + q(l.source || 'Angelechy Shatranga') + ', solo puedes intentar activar ' + max + ' efectos de monstruo por turno (ya van ' + n + ').'); break; }
+      }
+    }
     // Bloqueos activos que impiden activar (p. ej. "you cannot activate")
+    // Artifact Lancea: nadie puede desterrar este turno (un costo que destierra no se paga; lo que destierra al resolverse no pasa)
+    const nb = noBanishLock(t);
+    if (nb) {
+      let res = String(e.text || '');
+      if (e.condition) res = res.replace(e.condition, '');
+      if (e.cost) res = res.replace(e.cost, '');
+      if (e.cost && BANISH_VERB.test(e.cost)) err(v, noBanishText(nb) + ' No puedes pagar el costo de este efecto (destierra).');
+      else if (BANISH_VERB.test(res)) warn(v, noBanishText(nb) + ' Lo que este efecto destierre no se destierra.');
+    }
   }
   /** Límites por arquetipo del turno (Mulcharmy): cuenta los efectos de monstruo del arquetipo ya activados. */
   function archLimits(v, t, c, e) {
@@ -1817,6 +1848,29 @@
   }
 
   /* ---------- Movimientos manuales y bloqueos del rival ---------- */
+  /** ¿Sigue vigente este bloqueo del rival? Pregunta a YGO.bot.lockActive; sin él: con sourceUid, mientras esa carta siga
+   * boca arriba en el campo del rival; con until, hasta el final de ese turno; los demás, sí (se borran al pasar de turno). */
+  function lockLive(S, l) {
+    if (!l) return false;
+    const B = YGO.bot;
+    if (B && typeof B.lockActive === 'function') {
+      try { return !!B.lockActive(S, l); } catch (e) { /* sigue con la versión local */ }
+    }
+    if (l.sourceUid) return !!(S && S.opp && Array.isArray(S.opp.field) && S.opp.field.some((x) => x && x.uid === l.sourceUid && !x.faceDown));
+    if (l.until != null) return tsOf(S).turn <= Number(l.until);
+    return true;
+  }
+  const liveLocks = (S, kind) => tsOf(S).locks.filter((l) => l && l.kind === kind && lockLive(S, l));
+  // Angelechy Destrier en una Zona de Monstruo Extra ({ kind: 'emzTaken', zone }): esa zona no es tuya mientras siga ahí
+  const emzTakenLock = (S, zone) => liveLocks(S, 'emzTaken').find((l) => (l.zone || 'emz1') === zone) || null;
+  // Angelechy Shatranga ({ kind: 'monsterEffectCap', max }): solo puedes intentar activar max efectos de monstruo por turno
+  const pendAct = (a) => { const c = db.get(a.id); const e = c && effectsOf(c).find((x) => x.index === Number(a.effectIndex)); return !!(e && e.pendulum); };
+  /** Efectos de monstruo que ya intentaste activar este turno (los negados también cuentan; los de Péndulo, no). */
+  const monsterActs = (t) => t.acts.filter((a) => a && a.monster && !pendAct(a)).length;
+  // Artifact Lancea ({ kind: 'noBanish' }): este turno nadie puede desterrar cartas
+  const noBanishLock = (t) => t.locks.find((l) => l && l.kind === 'noBanish') || null;
+  const noBanishText = (l) => 'Por ' + q(l.source || 'Artifact Lancea') + ', este turno nadie puede desterrar cartas.';
+  const BANISH_VERB = /\bbanish\b/i;
   /** Movimiento manual (añadir del Mazo a la mano, etc.). Los robos no pasan por aquí (Droll no los impide). */
   function checkMove(S, uid, dest, opts) {
     const v = verdict();
@@ -1824,6 +1878,8 @@
       const loc = locate(S, uid);
       if (!loc) { err(v, 'No encuentro esa carta.'); return done(v); }
       const t = tsOf(S);
+      const nb = dest === 'ban' ? noBanishLock(t) : null;
+      if (nb) err(v, noBanishText(nb));
       if (dest === 'hand' && loc.area === 'deck' && !(opts && opts.draw)) {
         for (const l of t.locks) {
           if (l && l.kind === 'noDeckAdd') err(v, 'Por ' + q(l.source || 'Droll & Lock Bird') + ', este turno no se pueden añadir cartas del Mazo a la mano.');
@@ -1832,12 +1888,15 @@
     } catch (e) { warn(v, 'No pude revisar este movimiento.'); }
     return done(v);
   }
-  /** Agrega un bloqueo de este turno: { kind: 'noDeckAdd', source, text }. Se borra al pasar de turno. */
+  /** Agrega un bloqueo: { kind: 'noDeckAdd' | 'noBanish' | 'gyToBan' | 'monsterEffectCap' | 'emzTaken', source, text,
+   * sourceUid?, until?, zone?, max? }. Se borra al pasar de turno salvo los que tienen sourceUid o until (ver passTurn).
+   * Uno igual (tipo y carta) no se repite; si es de otra copia (otro sourceUid) o con otro until, reemplaza al anterior. */
   function addLock(S, lock) {
     const t = ensureTS(S);
-    if (lock && typeof lock === 'object' && !t.locks.some((l) => l && l.kind === lock.kind && l.source === lock.source)) {
-      t.locks.push(Object.assign({}, lock));
-    }
+    if (!lock || typeof lock !== 'object') return t;
+    const i = t.locks.findIndex((l) => l && l.kind === lock.kind && l.source === lock.source);
+    if (i < 0) t.locks.push(Object.assign({}, lock));
+    else if (t.locks[i].sourceUid !== lock.sourceUid || t.locks[i].until !== lock.until) t.locks[i] = Object.assign({}, lock);
     return t;
   }
 

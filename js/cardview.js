@@ -38,7 +38,7 @@
     return (c.type & db.T.XYZ ? '✪' : '★') + c.lv;
   }
 
-  /** Miniatura de carta. opts: { useBanlist, size: 'small'|'big', attrs: 'atributos html extra' } */
+  /** Miniatura de carta. opts: { useBanlist, size: 'small'|'big', attrs: 'atributos html extra', atk: ATK de ahora (si cambió) } */
   function tile(c, opts) {
     opts = opts || {};
     const frame = db.frame(c).split(' ').map((f) => 'f-' + f).join(' ');
@@ -46,7 +46,8 @@
     if (images.state === 'ok') {
       inner = '<img loading="lazy" alt="' + esc(c.name) + '" src="' + db.imageUrl(c.id, opts.size === 'big' ? 'big' : 'small') + '">';
     } else {
-      const stat = db.isMonster(c) ? (c.atk < 0 ? '?' : c.atk) + (c.isLink ? '' : '/' + (c.def < 0 ? '?' : c.def)) : '';
+      const atk = typeof opts.atk === 'number' ? opts.atk : c.atk < 0 ? '?' : c.atk;
+      const stat = db.isMonster(c) ? atk + (c.isLink ? '' : '/' + (c.def < 0 ? '?' : c.def)) : '';
       inner = '<div class="face"><span class="nm">' + esc(c.name) + '</span><span class="lv">' + stars(c) + '</span>'
         + (stat ? '<span class="st">' + stat + '</span>' : '') + '</div>';
     }
