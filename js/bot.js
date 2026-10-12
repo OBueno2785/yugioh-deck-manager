@@ -306,9 +306,16 @@
   }
   /** Tu monstruo invocado desde el Extra Deck (Fusión, Sincronía, Xyz, Link). */
   const fromExtra = (inst, c) => !!(c && db.isExtra(c) && (['fusion', 'synchro', 'xyz', 'link'].includes(inst.summonMethod) || inst.summonFrom === 'extra' || inst.from === 'extra'));
-  /** Todas tus cartas (Mazo, mano, Extra Deck, Cementerio y campo) para medir qué usa tu mazo. */
+  /** Todas tus cartas (Mazo, mano, Extra Deck, Cementerio y campo) para medir qué usa tu mazo.
+   * VS: solo lo que el rival ve (Cementerio, desterradas y campo boca arriba): nunca tu mano, tu Mazo ni lo boca abajo. */
   function playerCards(S) {
     const out = [];
+    const vs = !!(S.opp && S.opp.vs);
+    if (vs) {
+      for (const a of ['gy', 'ban']) for (const x of (Array.isArray(S[a]) ? S[a] : [])) if (x && !x.faceDown) out.push(x);
+      for (const z of FIELD_ZONES) for (const x of (S.zones && Array.isArray(S.zones[z]) ? S.zones[z] : [])) if (x && !x.token && x.owner !== 'opp' && !x.faceDown) out.push(x);
+      return out.map((x) => db.get(x.id)).filter(Boolean);
+    }
     for (const a of ['deck', 'hand', 'extra', 'gy']) for (const x of (Array.isArray(S[a]) ? S[a] : [])) out.push(x);
     for (const z of FIELD_ZONES) for (const x of (S.zones && Array.isArray(S.zones[z]) ? S.zones[z] : [])) if (!x.token && x.owner !== 'opp') out.push(x);
     return out.map((x) => x && db.get(x.id)).filter(Boolean);
@@ -558,10 +565,12 @@
   }
   /** Carta de apoyo del Mazo del rival: una copia real si la tiene; si no (PSY-Frame Driver, Fire Attacker, un "Synchron"),
    * da por hecho que la juega: saca una carta cualquiera del Mazo y usa la carta real.
-   * kind: 'driver' | 'fire' | 'synchron' | 'ashened' | 'kuriboh' | 'dominus' | 'blank' (una carta cualquiera: la Trampa Angelechy) */
-  function takeSupport(S, kind) {
+   * kind: 'driver' | 'fire' | 'synchron' | 'ashened' | 'kuriboh' | 'dominus' | 'blank' (una carta cualquiera: la Trampa Angelechy)
+   * En el modo VS (S.opp.vs) nunca inventa: una copia real o null (need: qué carta sirve como 'blank'). */
+  function takeSupport(S, kind, need) {
     const opp = S.opp;
     const pick = (list, test) => { const i = list.findIndex((x) => x && !x.blank && test(x)); return i >= 0 ? list.splice(i, 1)[0] : null; };
+    if (opp.vs) return realSupport(S, kind, need);
     if (kind === 'kuriboh') {
       // "1 monster with 300 ATK/200 DEF from your Deck or GY": otra «Multiplying Kuriboh!» primero (o «Griffoh», que también es 300/200)
       const id = HANDTRAPS[KURIBOH] && HANDTRAPS[KURIBOH].id;
@@ -577,6 +586,44 @@
     const uid = b >= 0 ? opp.deck.splice(b, 1)[0].uid : newUid(opp);
     return { uid, id };
   }
+  /* Modo VS (S.opp.vs): el rival juega su mazo de verdad y nunca inventa cartas. realSupport da una copia real de su Mazo
+   * (o de la mano o el Cementerio si el texto lo permite) o null; supportFrom dice de dónde salió la última. */
+  let supportFrom = 'deck';
+  const isCopy = (id) => (x) => !!(x && !x.blank && x.id === id);
+  const supportTests = {
+    driver: isCopy(SUPPORT.driver), fire: isCopy(SUPPORT.fire),
+    synchron: (x) => { const c = cardOf(x); return !!(c && db.isMonster(c) && /\bSynchron\b/.test(c.name)); },
+    ashened: (x) => { const c = cardOf(x); return !!(c && db.isTrap(c) && c.type & T.CONTINUOUS && /\bAshened\b/.test(c.name)); },
+    dominus: (x) => /\bDominus\b/.test(nameById(x.id)),
+  };
+  // De dónde puede salir cada una ("1 "PSY-Frame Driver" from your hand, Deck, or GY")
+  const supportPiles = (kind) => (kind === 'driver' ? ['deck', 'hand', 'gy'] : kind === 'kuriboh' ? ['deck', 'gy'] : ['deck']);
+  function realSupport(S, kind, need) {
+    const opp = S.opp;
+    if (kind === 'kuriboh') {
+      const id = HANDTRAPS[KURIBOH] && HANDTRAPS[KURIBOH].id;
+      for (const t of [isCopy(id), is300]) {
+        for (const p of supportPiles(kind)) {
+          const i = opp[p].findIndex((x) => x && !x.blank && t(x));
+          if (i >= 0) { supportFrom = p; return opp[p].splice(i, 1)[0]; }
+        }
+      }
+      return null;
+    }
+    const test = kind === 'blank' ? (typeof need === 'function' ? need : null) : supportTests[kind];
+    if (!test) return null;
+    for (const p of supportPiles(kind)) {
+      const list = Array.isArray(opp[p]) ? opp[p] : [];
+      const i = list.findIndex((x) => x && !x.blank && !x.onChain && test(x));
+      if (i >= 0) { supportFrom = p; return list.splice(i, 1)[0]; }
+    }
+    return null;
+  }
+  const hasSupport = (S, kind) => supportPiles(kind).some((p) => (S.opp[p] || []).some((x) => x && !x.blank && !x.onChain && supportTests[kind](x)));
+  const PILE_FROM = { deck: 'desde su Mazo', hand: 'desde su mano', gy: 'desde su Cementerio' };
+  const noSupport = (by, what) => q(by) + ': el rival no tiene ' + what + ' en el Mazo.';
+  // Retaliating "C": "add 1 EARTH Insect monster with 1500 or less ATK from your Deck to your hand, except "Retaliating "C""
+  const earthInsect = (x) => { const c = cardOf(x); return !!(c && db.isMonster(c) && c.attribute & ATTR.EARTH && c.race & 0x800 && c.atk >= 0 && c.atk <= 1500 && !/^Retaliating "C"$/.test(c.name)); };
   /** Monstruo de 300 ATK/200 DEF (lo que Invoca el 2.º efecto de «Multiplying Kuriboh!»). */
   const is300 = (x) => { const c = cardOf(x); return !!(c && db.isMonster(c) && !c.isLink && c.atk === 300 && c.def === 200); };
   const hasKuribohCopy = (S) => [...S.opp.deck, ...S.opp.gy].some(is300);
@@ -953,6 +1000,20 @@
   /** Ghost Reaper: la carta genérica de tu Extra Deck (sin nombre de arquetipo en sus materiales) con más copias. → { id, n } | null */
   function reaperPick(S) {
     const counts = new Map();
+    // VS: no ve tu Extra Deck; elige una carta de su propio Extra Deck (la que revela) que ya te vio usar
+    if (S.opp && S.opp.vs) {
+      const own = new Set((Array.isArray(S.opp.extra) ? S.opp.extra : []).map((x) => x && x.id));
+      const seen = [];
+      for (const a of ['gy', 'ban']) for (const x of (Array.isArray(S[a]) ? S[a] : [])) if (x && !x.faceDown) seen.push(x);
+      for (const z of FIELD_ZONES) for (const x of (S.zones && Array.isArray(S.zones[z]) ? S.zones[z] : [])) if (x && !x.faceDown && !x.token && x.owner !== 'opp') seen.push(x);
+      let best = null;
+      for (const x of seen) {
+        const c = db.get(x.id);
+        if (!c || !db.isExtra(c) || !own.has(c.id)) continue;
+        if (!best || c.lv > best.lv) best = { id: c.id, n: 1, lv: c.lv, seen: true };
+      }
+      return best;
+    }
     for (const x of Array.isArray(S.extra) ? S.extra : []) {
       const c = x && db.get(x.id);
       if (!c || !db.isExtra(c) || x.extraFaceUp || x.faceUp) continue;
@@ -1004,7 +1065,8 @@
         && opp.hand.some((x) => x !== card && !x.blank && !x.onChain && db.isMonster(db.get(x.id) || { type: 0 }));
       case 'Songs': return !monsterInGy(opp);
       case 'Shiina': return freeBotZones(S) > 0 && botMonsters(S).some((x) => { const c = cardOf(x); return c && (c.attribute & ATTR.WIND) && !x.faceDown; });
-      case 'Gamma': case 'Delta': return botMonsters(S).length === 0;
+      // En VS necesita un «PSY-Frame Driver» de verdad en su Mazo, mano o Cementerio
+      case 'Gamma': case 'Delta': return botMonsters(S).length === 0 && (!opp.vs || hasSupport(S, 'driver'));
       case 'Godos': return src === 'field' ? isMain(S) && !used(S, 'opt:' + h.name + '#2') && freeBotZones(S) > 0
         : phaseOf(S) !== 'draw' && !used(S, 'opt:' + h.name + '#1') && freeBotZones(S) > 0;
       case 'Izuna': return isMain(S) && handGy && freeBotZones(S) > 0;
@@ -1013,13 +1075,15 @@
       case 'Shifter': return opp.gy.length === 0 && !nb && !gyRedirect(S);
       case 'Reaper': return !nb && playerMonsters(S).length > botMonsters(S).length;
       case 'Crow': return !nb;
-      case 'Rescue-ACE': return src === 'field' || freeBotZones(S) > 0;
+      // En VS, desde la mano necesita un «Rescue-ACE Fire Attacker» de verdad en su Mazo
+      case 'Rescue-ACE': return src === 'field' || (freeBotZones(S) > 0 && (!opp.vs || hasSupport(S, 'fire')));
       // Griffoh: su escudo de daño no hace nada aquí y lo que Coloca necesita cartas de "Light and Darkness Ritual"
       case 'Griffoh': return false;
       // Typhoon desde la mano: controlas 2 o más Mágicas/Trampas (también boca abajo y las Escalas) y el rival ninguna
       case 'Typhoon': return playerSpellTraps(S).length >= 2 && botSpellTraps(S).length === 0;
       // Angelechy Opening to e4: solo si vas primero, en la Fase de Espera de tu primer turno (el evento 'start' del turno 1)
-      case 'Opening': return ev.type === 'start' && turn === 1;
+      // (En VS nunca: supone cartas que el rival no tiene)
+      case 'Opening': return !opp.vs && ev.type === 'start' && turn === 1;
       case 'Veidos': return src === 'gy' ? !used(S, 'opt:' + h.name + '#2') && veidosArmed(S, card)
         : isMain(S) && !used(S, 'opt:' + h.name + '#1') && freePlayerZone(S) && !!fieldZoneCard(S);
       default: return true;
@@ -1205,7 +1269,8 @@
             const place = k === 'purulia' ? 'la mano' : 'el Cementerio o el destierro';
             score = n === 0 ? top : Math.max(20, top - 35 - 10 * n);
             reasons = [n === 0 ? 'Antes de que empieces a Invocar desde ' + place : 'Todavía te quedan invocaciones por hacer'];
-            if (n === 0 && top >= 70) reasons.push('Tu mazo Invoca mucho desde ' + place);
+            // (VS sin nada tuyo a la vista: no sabe qué hace tu mazo, no lo dice)
+            if (n === 0 && top >= 70 && !(opp.vs && !playerCards(S).length)) reasons.push('Tu mazo Invoca mucho desde ' + place);
             text = k === 'purulia' ? 'este turno roba 1 carta cada vez que Invocas de modo Normal o Especial desde la mano'
               : 'este turno roba 1 carta cada vez que Invocas de modo Especial desde el Cementerio o el destierro';
           }
@@ -1362,7 +1427,8 @@
         case 'Reaper': {
           const p = reaperPick(S);
           if (!p) break;
-          add({ target: { id: p.id }, score: Math.min(90, 40 + 15 * p.n), reasons: ['Tienes ' + p.n + ' copia' + (p.n === 1 ? '' : 's') + ' de ' + q(nameById(p.id)) + ' en el Extra Deck'],
+          add({ target: { id: p.id }, score: Math.min(90, 40 + 15 * p.n), reasons: [p.seen ? 'Ya usaste ' + q(nameById(p.id)) + ': puede que tengas más copias en el Extra Deck'
+            : 'Tienes ' + p.n + ' copia' + (p.n === 1 ? '' : 's') + ' de ' + q(nameById(p.id)) + ' en el Extra Deck'],
             on: 'tu Extra Deck', text: 'destierra todas las copias de ' + q(nameById(p.id)) + ' de tu Extra Deck' });
           break;
         }
@@ -1450,7 +1516,8 @@
       }
       if (!lost.length) return true;
       o.score -= Math.min(40, 20 * lost.length);
-      o.reasons = o.reasons.concat(['Deja sin usar ' + lost.map(q).join(', ')]);
+      // VS: su mano es oculta (cuenta en el puntaje, pero el motivo no la nombra)
+      if (!opp.vs) o.reasons = o.reasons.concat(['Deja sin usar ' + lost.map(q).join(', ')]);
       return o.score > 0;
     });
   }
@@ -1620,6 +1687,7 @@
     const card = { uid: e.uid, id: e.id };
     const c = db.get(e.id);
     const mon = isMonsterEntry(e);
+    if (opp.vs) return leaveVs(S, e, c, mon, how, name, card);
     let where;
     if (how === 'hand' && c && db.isExtra(c)) where = 'extra'; // a su Extra Deck (el rival no lleva la cuenta)
     else if (how === 'hand') { opp.hand.push(card); where = 'hand'; } else if (how === 'banish') { opp.ban.push(card); where = 'ban'; } else where = botToGy(S, card);
@@ -1630,6 +1698,33 @@
     if (e.gyLock && where === 'gy') {
       opp.hand.push(takeSupport(S, 'blank'));
       text += ' El rival añade 1 Insecto TIERRA de su Mazo a la mano (por ' + q(name) + ').';
+    }
+    return { text, ops };
+  }
+  /** leaveBotField en el modo VS (la entrada ya salió de opp.field): sus materiales Xyz van a su Cementerio, los Tokens desaparecen,
+   * un monstruo del Extra Deck que vuelve a la mano va a su Extra Deck y una carta boca abajo que vuelve no se nombra. */
+  function leaveVs(S, e, c, mon, how, name, card) {
+    const opp = S.opp;
+    const ops = [];
+    const mats = Array.isArray(e.mats) ? e.mats : [];
+    for (const m of mats) botToGy(S, { uid: m.uid, id: m.id });
+    if (!Array.isArray(opp.extra)) opp.extra = [];
+    let where;
+    if (e.token || (c && c.type & T.TOKEN)) where = 'gone';
+    else if (how === 'hand' && c && db.isExtra(c)) { opp.extra.push(card); where = 'extra'; } else if (how === 'hand') { opp.hand.push(card); where = 'hand'; } else if (how === 'banish') { opp.ban.push(card); where = 'ban'; } else where = botToGy(S, card);
+    const o = mon ? 'o' : 'a';
+    let text;
+    if (e.faceDown && (where === 'hand' || where === 'extra')) text = 'Una carta boca abajo del rival vuelve a su ' + (where === 'hand' ? 'mano' : 'Extra Deck') + '.';
+    else {
+      text = (e.faceDown ? q(name) + ' (estaba boca abajo)' : q(name) + ' del rival') + ' ' + (where === 'gone' ? 'desaparece' : where === 'extra' ? 'vuelve a su Extra Deck'
+        : where === 'hand' ? 'vuelve a su mano' : where === 'ban' ? 'queda desterrad' + o : how === 'destroy' ? 'es destruid' + o + ' y va a su Cementerio'
+          : how === 'tribute' ? 'es sacrificad' + o + ' y va a su Cementerio' : 'va a su Cementerio') + '.';
+    }
+    if (mats.length) text += ' ' + (mats.length === 1 ? 'Su material va' : 'Sus ' + mats.length + ' materiales van') + ' a su Cementerio.';
+    // Retaliating "C" mandada del campo al Cementerio: busca un Insecto TIERRA de verdad (si tiene)
+    if (e.gyLock && where === 'gy') {
+      const x = takeSupport(S, 'blank', earthInsect);
+      if (x) { opp.hand.push(x); text += ' El rival añade ' + q(nameById(x.id)) + ' de su Mazo a la mano (por ' + q(name) + ').'; } else text += ' ' + noSupport(name, 'un Insecto TIERRA de 1500 ATK o menos');
     }
     return { text, ops };
   }
@@ -1767,7 +1862,7 @@
         // "...then if you have a Trap in your GY, you can add 1 "Dominus" card from your Deck to your hand"
         if (trapInGy(opp)) {
           const d = takeSupport(S, 'dominus');
-          if (d) { opp.hand.push(d); log('El rival añade 1 carta «Dominus» de su Mazo a la mano (por ' + q(by) + ').'); }
+          if (d) { opp.hand.push(d); log('El rival añade 1 carta «Dominus» de su Mazo a la mano (por ' + q(by) + ').'); } else if (opp.vs) log(noSupport(by, 'una carta «Dominus»'));
         }
         break;
       }
@@ -1921,7 +2016,7 @@
         log('El rival Invoca de modo Especial ' + q(nameById(m.id)) + ' desde su mano, con sus efectos negados (por ' + q(by) + ').');
         if (freeBotZones(S) > 0 && playerMonsters(S).some((x) => fromExtra(x.inst, x.c))) {
           const sy = takeSupport(S, 'synchron');
-          if (sy) { toField(S, sy, by); log('El rival Invoca de modo Especial ' + q(nameById(sy.id)) + ' desde su Mazo (por ' + q(by) + ').'); }
+          if (sy) { toField(S, sy, by); log('El rival Invoca de modo Especial ' + q(nameById(sy.id)) + ' desde su Mazo (por ' + q(by) + ').'); } else if (opp.vs) log(noSupport(by, 'un monstruo «Synchron»'));
         }
         log('Con ' + q(by) + ' en su Cementerio, el rival podría Invocar por Sincronía.');
         break;
@@ -1960,7 +2055,7 @@
         if (freeBotZones(S) < 2) { log('El rival no tiene 2 Zonas de Monstruo libres: ' + q(by) + ' no hace nada.'); break; }
         if (!selfSummon({ banishAtEnd: true })) break;
         const dr = takeSupport(S, 'driver');
-        if (dr) { toField(S, dr, by, { banishAtEnd: true }); log('El rival Invoca de modo Especial ' + q(nameById(dr.id)) + ' desde su Mazo.'); }
+        if (dr) { toField(S, dr, by, { banishAtEnd: true }); log('El rival Invoca de modo Especial ' + q(nameById(dr.id)) + ' ' + (opp.vs ? PILE_FROM[supportFrom] || 'desde su Mazo' : 'desde su Mazo') + '.'); } else if (opp.vs) log(noSupport(by, '«PSY-Frame Driver»'));
         if (!sameLink) { nothing('ese eslabón ya no está o ya fue negado.'); break; }
         ops.push({ op: 'negateLink', index: tgt.link, by });
         destroy(tl.uid);
@@ -2028,7 +2123,7 @@
       case 'Rescue-ACE': {
         if (freeBotZones(S) <= 0) { nothing('no tiene Zonas de Monstruo libres.'); break; }
         const fa = takeSupport(S, 'fire');
-        if (fa) { toField(S, fa, by); log('El rival Invoca de modo Especial ' + q(nameById(fa.id)) + ' desde su Mazo (por ' + q(by) + ').'); }
+        if (fa) { toField(S, fa, by); log('El rival Invoca de modo Especial ' + q(nameById(fa.id)) + ' desde su Mazo (por ' + q(by) + ').'); } else if (opp.vs) log(noSupport(by, '«Rescue-ACE Fire Attacker»'));
         break;
       }
       case 'Skull': {
@@ -2049,6 +2144,7 @@
         const t = turnOf(S);
         const place = (id, extra) => { const e = Object.assign({ uid: newUid(opp), id, by, turn: t }, extra); opp.field.push(e); return e; };
         const pb = takeSupport(S, 'blank'); // la Mágica de Campo sale de su Mazo
+        if (!pb) { log(noSupport(by, '«Angelechy Problem»')); break; } // (en VS no la usa: canUse)
         place(ANGELECHY.problem, { uid: pb.uid, zone: 'fz' });
         log('El rival pone «Angelechy Problem» boca arriba en su Zona de Campo.');
         const emz = !topOf(S, 'emz1') ? 'emz1' : !topOf(S, 'emz0') ? 'emz0' : null;
@@ -2064,8 +2160,8 @@
         const tx2 = 'Por «Angelechy Shatranga» del rival, solo puedes intentar activar hasta 5 efectos de monstruo por turno.';
         ops.push({ op: 'lock', lock: { kind: 'monsterEffectCap', max: 5, source: 'Angelechy Shatranga', sourceUid: sa.uid, text: tx2 }, by });
         log('Por «Angelechy Bastion», el rival pone «Angelechy Shatranga» como Mágica Continua.');
-        opp.hand.push(takeSupport(S, 'blank'));
-        log('Por «Angelechy Shatranga», el rival añade 1 Trampa «Angelechy» de su Mazo a la mano.');
+        const at = takeSupport(S, 'blank');
+        if (at) { opp.hand.push(at); log('Por «Angelechy Shatranga», el rival añade 1 Trampa «Angelechy» de su Mazo a la mano.'); } else log(noSupport(by, 'una Trampa «Angelechy»'));
         break;
       }
       case 'Veidos': {
@@ -2098,7 +2194,7 @@
         log('El rival Invoca ' + q(by) + ' en tu campo en Defensa.');
         destroy(tgt.uid);
         const ash = takeSupport(S, 'ashened');
-        if (ash) { opp.hand.push(ash); log('El rival añade ' + q(nameById(ash.id)) + ' de su Mazo a la mano (por ' + q(by) + ').'); }
+        if (ash) { opp.hand.push(ash); log('El rival añade ' + q(nameById(ash.id)) + ' de su Mazo a la mano (por ' + q(by) + ').'); } else if (opp.vs) log(noSupport(by, 'una Trampa Continua «Ashened»'));
         break;
       }
       default: log(q(by) + ' se resuelve.');
@@ -2338,6 +2434,6 @@
     HANDTRAPS, DEFAULT_POOL, MODE_LABELS, TOKEN_ID, TOKEN_NAME, HT_MAX, SUPPORT, ANGELECHY,
     newOpponent, normalizePool, isOldDefaultPool, observe, consider, options, commit, resolveLink, summary, view, negatedBy: negatedByPlayer,
     negatedLink, classify, classifyText, isHandtrap, supported, tokenInstance, threshold,
-    takeControl, returnCard, removeFromField, lockActive, gyRedirect,
+    takeControl, returnCard, removeFromField, lockActive, gyRedirect, rand, shuffle, monsterLock,
   };
 })();

@@ -41,7 +41,10 @@
 
   // fieldSecond: ir segundo; botCount: 0 (sin rival) | 2 | 3 | '2-3'; botMode: 'smart' | 'aggressive'; botPool: [{ name, copies }]
   // fieldAuto: tus efectos en Automático (js/effects.js los lee y el campo los hace) o Manual (los haces tú)
-  const prefs = Object.assign({ handSize: 5, fieldStrict: true, fieldSecond: false, botCount: 0, botMode: 'smart', botPool: null, fieldAuto: false }, store.prefs());
+  // fieldVs: el último tipo de duelo (Prueba o VS); vsRivalDeckId, vsFirst ('me'|'rival'|'coin'), vsPace ('normal'|'fast'|'step'),
+  // vsAskOnly y vsResponds: lo elegido para el modo VS en "Nuevo duelo"
+  const prefs = Object.assign({ handSize: 5, fieldStrict: true, fieldSecond: false, botCount: 0, botMode: 'smart', botPool: null, fieldAuto: false,
+    fieldVs: false, vsRivalDeckId: null, vsFirst: 'coin', vsPace: 'normal', vsAskOnly: true, vsResponds: true }, store.prefs());
   const savePref = (patch) => { Object.assign(prefs, patch); store.savePrefs(Object.assign(store.prefs(), patch)); };
   // Antes el campo repartía prefs.handSize: quien tenía 6 practicaba ir segundo (se guarda una vez como fieldSecond)
   if (store.prefs().fieldSecond === undefined && Number(prefs.handSize) === 6) savePref({ fieldSecond: true });
@@ -66,6 +69,10 @@
   let autoGen = 0;        // sube al deshacer o empezar otro duelo: lo que estaba esperando una respuesta ya no sigue
   let dismissFn = null;   // qué hacer si la ventana se cierra sin tocar un botón (fuera de ella, Escape u otra ventana encima)
   let lastWent = null;    // a dónde fue de verdad la última carta que movió moveNow ('gy', 'ban', 'extra', 'opp', 'gone', una zona...)
+  // Modo VS: los pasos del rival no toman foto (quiet > 0) y Deshacer no baja de undoFloor (lo que hizo o mostró el rival).
+  // undoFloor vive fuera de S a propósito: deshacer no debe devolver un piso viejo.
+  let quiet = 0;
+  let undoFloor = 0;
 
   const decks = () => window.YGO.builder.decks();
   const blank = () => {
@@ -74,6 +81,39 @@
     return { deck: [], hand: [], extra: [], gy: [], ban: [], zones, lp: 8000, turnDraws: 0, turnState: newTurnState(), chain: [], log: [], opp: null };
   };
   const arr = (x) => (Array.isArray(x) ? x : []);
+
+  /* ---------- Modo VS (js/duel.js, js/ai.js, js/vsview.js, js/vs.js) ----------
+   * Duelo completo contra la computadora. Todo lo del VS pasa por estos envoltorios (como botCall): si un módulo falta o
+   * falla, se avisa en la consola y el campo sigue como en Prueba. Sin S.vs (modo Prueba) ningún gancho cambia nada. */
+  function modCall(mod, name, args, fallback) {
+    const M = window.YGO[mod];
+    if (M && typeof M === 'object' && typeof M[name] === 'function') {
+      try { return M[name].apply(M, args || []); } catch (err) { console.warn('YGO.' + mod + '.' + name + ' falló', err); }
+    }
+    return typeof fallback === 'function' ? fallback() : fallback;
+  }
+  const duelCall = (name, args, fallback) => modCall('duel', name, args, fallback);
+  const aiCall = (name, args, fallback) => modCall('ai', name, args, fallback);
+  const viewCall = (name, args, fallback) => modCall('vsview', name, args, fallback);
+  const vsCall = (name, args, fallback) => modCall('vs', name, args, fallback);
+  /** ¿El duelo actual es VS? */
+  const isVs = () => !!(S && S.vs) && !!duelCall('isVs', [S], false);
+  /** ¿Están los cuatro módulos del VS? Si falta uno, el botón VS queda desactivado y todo es Prueba. */
+  const vsReady = () => ['duel', 'ai', 'vsview', 'vs'].every((m) => !!window.YGO[m] && typeof window.YGO[m] === 'object');
+  const VS_OFF = 'Modo VS no disponible';
+  const FLOOR_TOAST = 'No puedes deshacer lo que ya hizo el rival';
+  /** Piso de Deshacer en VS: no se vuelve a antes de esto (lo llama vs.js tras cada paso del rival, daño, turno nuevo...). */
+  const lockUndo = () => {
+    undoFloor = histBase + history.length;
+    const b = $('#fd-undo');
+    if (b && S) b.disabled = !canUndo(); // (sin esperar al próximo dibujo)
+  };
+  /** ¿Hay algo que deshacer? En VS, solo lo tuyo después del piso. */
+  const canUndo = () => history.length > 0 && (!isVs() || histBase + history.length > undoFloor);
+  /** Lo que vs.js pide que se vea en el tablero: { targets, direct, attacker, mode, lpFx }. */
+  const vsUi = () => { const u = vsCall('ui', [], null); return u && typeof u === 'object' ? u : {}; };
+  /** Entradas del registro que devuelven los módulos del VS ([{ kind, text }]). */
+  const vsLogs = (list) => arr(list).forEach((e) => { if (e && typeof e === 'object' && e.text) pushLog({ kind: e.kind || 'opp', text: String(e.text) }); });
 
   /* ---------- Reglas (js/rules.js) ----------
    * Todas las consultas pasan por aquí: si el módulo falta o falla, el campo sigue funcionando sin revisar nada. */
@@ -270,17 +310,22 @@
 
   /* ---------- Estado ---------- */
   function snapshot() {
+    if (quiet > 0) return; // un paso del rival (VS): sin foto
     history.push(JSON.stringify(S));
     if (history.length > 150) { history.shift(); histBase++; }
   }
   function undo() {
-    if (!history.length) { toast('No hay nada que deshacer'); return; }
+    // (VS: al empezar tu turno, lo de antes es del rival)
+    if (!history.length) { toast(isVs() && hasPlays() ? FLOOR_TOAST : 'No hay nada que deshacer'); return; }
+    // VS: lo que hizo o mostró el rival no se deshace
+    if (!canUndo()) { toast(FLOOR_TOAST); return; }
     // A mitad de un eslabón automático: lo que esperaba respuesta ya no sigue (el eslabón queda sin resolver)
     if (autoBusy) closeModal();
     abortAuto();
     S = JSON.parse(history.pop());
     selected = null;
     pending = null;
+    if (isVs()) vsCall('restored');
     render();
   }
 
@@ -296,6 +341,9 @@
   /** Duelo nuevo. handIds/restIds: mano y mazo exactos (si no, se reparte al azar).
    * opts: { second, bot: { enabled, count, mode, pool, seed, forceHand } }; sin opts.bot se usan las preferencias. */
   function newDuel(handIds, restIds, opts) {
+    // VS: lo que esperaba el duelo anterior (temporizadores del rival, ventanas) ya no sigue
+    vsCall('reset');
+    undoFloor = 0;
     opts = opts || {};
     const second = opts.second !== undefined ? !!opts.second : !!freshPrefs().fieldSecond;
     // Una ventana del campo que quedó abierta (p. ej. "El rival responde" del duelo anterior) ya no vale
@@ -318,6 +366,8 @@
       S.hand = S.deck.splice(0, 5);
     }
     S.extra = d.extra.map(game.instance);
+    // Modo VS: el rival con su propio mazo (js/duel.js). Si no se puede, sigue como Prueba.
+    if (opts.vs && startVs(opts.vs)) return;
     if (second) secondDraw(!!handIds && handIds.length >= 6);
     const cfg = botConfig(opts.bot);
     S.opp = makeOpponent(cfg);
@@ -330,6 +380,30 @@
     botEvent({ type: 'start' });
     // Lo que se anotó al repartir (el robo de quien va segundo, la respuesta del rival al empezar) no cuenta como jugada tuya
     S.setupLog = S.log.length;
+  }
+
+  /** Duelo VS (lo llama newDuel con tu mano, Mazo y Extra Deck ya repartidos): YGO.duel.setup arma el lado del rival.
+   * cfg: { rival (mazo o su id), firstPref, pace, askOnly, responds, seed?, rivalHand?, rivalOrder? }. → true si empezó. */
+  function startVs(cfg) {
+    if (!vsReady()) { toast(VS_OFF, 'bad'); return false; }
+    const dealt = JSON.stringify(S);
+    const r = duelCall('setup', [S, Object.assign({}, cfg, { starters: arr(d.starters).slice() })], null);
+    if (!r || typeof r !== 'object' || r.ok === false || !isVs()) {
+      S = JSON.parse(dealt); // lo repartido queda como estaba: sigue como Prueba
+      toast('No se pudo empezar el duelo VS', 'bad');
+      return false;
+    }
+    arr(r.logs).forEach((t) => { if (t) pushLog({ kind: 'vs', text: String(t) }); });
+    if (r.coin) toast('Moneda: ' + (r.first === 'me' ? 'empiezas tú' : 'empieza el rival'), 'ok');
+    const v = S.vs;
+    S.start = {
+      deckId: d.id, hand: S.hand.map((x) => x.id), second: r.first === 'rival',
+      vs: { rivalId: v.rival ? v.rival.id : null, firstPref: v.firstPref, pace: v.pace, askOnly: v.askOnly, responds: v.responds },
+    };
+    render();
+    vsCall('begin');
+    S.setupLog = S.log.length;
+    return true;
   }
 
   /** Vas segundo: en la Fase de Robo robas 1 (si la mano ya trae 6 cartas, la 6ª cuenta como la robada). */
@@ -458,6 +532,7 @@
     delete c.summonedTurn; delete c.summonMethod; delete c.setTurn; delete c.positionChangedTurn; delete c.extraFaceUp; delete c.level;
     delete c.negated; // la negación de Veiler o Impermanence es solo mientras está en el campo
     delete c.atkSet; // el ATK cambiado por el rival (Multiplying Kuriboh!) también
+    delete c.attackedTurn; // VS: el turno en que atacó
     return c;
   };
   /** Vuelve a la mano, al mazo o boca abajo al Extra Deck: ya no cuenta cómo se invocó antes. */
@@ -489,7 +564,8 @@
   /* Angelechy Opening to e4: Destrier ocupa una Zona de Monstruo Extra ({ kind: 'emzTaken', zone }) y Shatranga limita tus
    * efectos de monstruo ({ kind: 'monsterEffectCap', max }); los dos mientras la carta siga en el campo del rival. */
   const emzTaken = (z) => (EMZ.includes(z) && locksOf('emzTaken').find((l) => (l.zone || 'emz1') === z)) || null;
-  const takenText = (l) => 'Esa Zona de Monstruo Extra la ocupa ' + (l && l.source ? q(l.source) + ' del rival' : 'un monstruo del rival');
+  const takenText = (l) => (l && l.vsEmz && l.text ? String(l.text).replace(/\.$/, '') // VS (js/duel.js): sin nombrar lo que está boca abajo
+    : 'Esa Zona de Monstruo Extra la ocupa ' + (l && l.source ? q(l.source) + ' del rival' : 'un monstruo del rival'));
   const capOf = (l) => (Number(l.max) > 0 ? Number(l.max) : 5);
   /** Efectos de monstruo que intentaste activar este turno (los cuenta YGO.rules en turnState.acts; los de Péndulo no). */
   function monsterActs() {
@@ -980,7 +1056,8 @@
     if (r) placeSummoned(r.card, req.zone, req.method, req.position, under);
     afterPlay(v);
     botEvent({ type: 'summon', uids: [req.uid], method: req.method, from });
-    if (typeof after === 'function') setTimeout(() => after(true), 0);
+    // (en una microtarea: el eslabón automático que pidió la invocación sigue apenas termina este clic, sin esperar otro ciclo)
+    if (typeof after === 'function') queueMicrotask(() => after(true));
   }
   /** Termina la invocación en curso sin hacerla (Cancelar, Escape, la carta ya no está): si la pidió un eslabón
    * automático, se le avisa una sola vez. */
@@ -1501,8 +1578,9 @@
       if (l.done) continue;
       const opp = l.owner === 'opp';
       // Ash y Belle solo niegan un eslabón de abajo: no importa el orden. Si tu respuesta lo niega, tampoco.
+      // (Un eslabón de la IA del VS: ella dice si tu respuesta lo niega)
       if (opp && !l.negated && doing.length && !['Ash', 'Belle'].includes(shortName(l.handtrap || nameById(l.id)))
-        && !botCall('negatedBy', [S, i], null)) { stop = i; break; }
+        && !(l.ai ? aiCall('negatedBy', [S, i], null) : botCall('negatedBy', [S, i], null))) { stop = i; break; }
       // Automático (sin negar; si solo perdió su carta, igual se hace lo que se pueda): antes, lo que haces a mano de arriba
       if (!opp && l.auto && !(l.negated && !l.negated.fizzle)) {
         if (doing.length) stop = i; else autoAt = i;
@@ -1517,10 +1595,11 @@
           + (opp ? '' : fizzle ? ' · Haz solo lo que no necesite esa carta' : ' · No hagas lo que dice este efecto') });
         if (opp) {
           // El rival anota que quedó negada y su carta deja la cadena; sus operaciones no se aplican
-          if (!Array.isArray(botCall('resolveLink', [S, i], null))) oppNegated(l, i);
+          if (l.ai) aiCall('negatedLink', [S, i], []);
+          else if (!Array.isArray(botCall('resolveLink', [S, i], null))) oppNegated(l, i);
         } else if (!fizzle) negatedMine.push('CL' + (i + 1));
       } else if (opp) {
-        const ops = botCall('resolveLink', [S, i], []);
+        const ops = l.ai ? aiCall('resolveLink', [S, i], []) : botCall('resolveLink', [S, i], []);
         if (l.negated) {
           // El rival vio que lo negaste (Called by the Grave / Crossout Designator sobre esa handtrap): no hace nada
           pushLog({ kind: 'opp', text: 'CL' + (i + 1) + ': ' + q(nameById(l.id)) + ' queda negado' + (l.negated.by ? ' (por ' + byText(l.negated.by) + ')' : '') });
@@ -1583,11 +1662,14 @@
         + (by ? ' (por ' + byText(by) + ')' : '') + ': ' + banned.join(', ') });
     }
     const resolved = S.chain;
+    // VS: las Mágicas/Trampas de la IA van a su Cementerio; tu Droll le cierra el Mazo; tu Veiler/Imperm niega a su monstruo
+    if (isVs()) vsLogs(aiCall('afterChain', [S, S.chain, {}], []));
     S.chain = [];
     render();
     if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
     // chain: la cadena que se acaba de resolver (el rival mira si tus Called by the Grave quedaron negados)
     botEvent({ type: 'resolved', chain: JSON.parse(JSON.stringify(resolved)) });
+    if (isVs()) vsCall('chainClosed');
   }
 
   /** Marca o desmarca un eslabón como negado (p. ej. respondiste a Ash Blossom con Called by the Grave). */
@@ -1618,9 +1700,11 @@
     const n = S.chain.length;
     const l = S.chain[n - 1];
     if (!l) return;
+    const opp = l.owner === 'opp';
+    // VS: la respuesta del rival (y lo de antes del piso de Deshacer) no se deshace
+    if (isVs() && (opp || l.ai || (typeof l.snap === 'number' && l.snap < undoFloor))) { toast(FLOOR_TOAST, 'warn'); return; }
     abortAuto(); // un eslabón automático a medias (p. ej. eligiendo materiales) queda sin hacer
     const name = q(nameById(l.id));
-    const opp = l.owner === 'opp';
     const i = typeof l.snap === 'number' ? l.snap - histBase : -1;
     if (i >= 0 && i < history.length) {
       const prev = JSON.parse(history[i]);
@@ -1630,6 +1714,7 @@
         history.length = i;
         selected = null;
         pending = null;
+        if (isVs()) vsCall('restored');
         render();
         toast(opp ? 'Se deshizo tu última jugada y la respuesta del rival (' + name + ')'
           : 'Se deshizo CL' + n + ' (' + name + ')' + (after ? ' y lo que hiciste después' : ''), 'ok');
@@ -1753,13 +1838,24 @@
   const DEFAULT_FROM = { discard: ['hand'], reveal: ['hand'], tribute: ['mzone'], level: ['mzone'], position: ['mzone'] };
   const describe = (a) => String(fxCall('describe', [a], () => (a && a.text) || '') || (a && a.text) || '');
   const oppEntry = (uid) => arr(S.opp && S.opp.field).find((x) => x && x.uid === uid) || null;
-  const anyName = (uid) => { const x = !locate(uid) && oppEntry(uid); return x ? nameById(x.id) : nameOf(uid); };
-  const qList = (uids) => listEs(uids.map((u) => q(anyName(u))));
+  /** VS: carta del campo del rival que no se ve (boca abajo): nunca se nombra. */
+  const hiddenOpp = (x) => !!(x && x.faceDown && isVs());
+  const anyName = (uid) => {
+    const x = !locate(uid) && oppEntry(uid);
+    if (hiddenOpp(x)) return duelCall('rivalName', [S, x], 'una carta boca abajo del rival');
+    return x ? nameById(x.id) : nameOf(uid);
+  };
+  const qList = (uids) => listEs(uids.map((u) => { const x = !locate(u) && oppEntry(u); return hiddenOpp(x) ? anyName(u) : q(anyName(u)); }));
+  /** La carta del rival para comparar con el filtro de un efecto: boca abajo, solo lo que se sabe por dónde está (VS). */
+  const oppCard = (x) => (hiddenOpp(x) ? duelCall('publicCard', [x, x.zone], null) : db.get(x.id));
 
   /** Zonas o pilas de donde sale lo que pide la acción (nunca el Cementerio, la mano ni el Mazo del rival). */
   function areasOf(a) {
     let from = Array.isArray(a.from) && a.from.length ? a.from.slice() : null;
     if (!from) from = a.owner === 'opp' ? ['oppField'] : a.owner === 'any' ? ['field', 'oppField'] : (DEFAULT_FROM[a.verb] || ['field']).slice();
+    // VS: su Cementerio o su mano no se eligen aquí (lo haces a mano)
+    if (isVs() && from.includes('oppGy')) toast('Hazlo a mano: toca su Cementerio');
+    else if (isVs() && from.includes('oppHand')) toast('Hazlo a mano: su mano está oculta');
     return from.filter((x, i) => from.indexOf(x) === i && !['oppGy', 'oppHand', 'oppDeck'].includes(x));
   }
   /** Cartas que cumplen la acción: [{ uid, inst, c, area, zone, opp }]. o: { self, exclude: Set, costCards, targetCards } */
@@ -1770,12 +1866,15 @@
     const base = { selfUid: o.self, costCards: o.costCards || [], targetCards: o.targetCards || [] };
     const add = (inst, area, zone, opp) => {
       if (!inst || skip.has(inst.uid) || out.some((x) => x.uid === inst.uid)) return;
-      const c = opp ? db.get(inst.id) : cardOf(inst);
+      // VS: una carta boca abajo del rival se compara solo con lo que se ve (monstruo o Mágica/Trampa, y su posición)
+      const hid = opp && hiddenOpp(inst);
+      const c = opp ? oppCard(inst) : cardOf(inst);
       if (!c) return;
       // Un monstruo del Extra Deck no puede ir a la mano (volvería al Extra Deck)
       if (a.verb === 'add' && db.isExtra(c)) return;
-      if (a.filter && !fxCall('match', [c, a.filter, Object.assign({ inst, area, zone: zone || null, opp: !!opp }, base)], false)) return;
-      out.push({ uid: inst.uid, inst, c, area, zone: zone || null, opp: !!opp });
+      const seen = hid ? { uid: inst.uid, faceDown: true, def: !!inst.def } : inst;
+      if (a.filter && !fxCall('match', [c, a.filter, Object.assign({ inst: seen, area, zone: zone || null, opp: !!opp }, base)], false)) return;
+      out.push(Object.assign({ uid: inst.uid, inst: seen, c, area, zone: zone || null, opp: !!opp }, hid ? { hidden: true } : {}));
     };
     const tops = (zs, up) => zs.forEach((z) => { const t = S.zones[z][0]; if (t && (!up || !t.faceDown)) add(t, 'field', z); });
     areasOf(a).forEach((area) => {
@@ -1809,12 +1908,16 @@
       o.cands.forEach((x) => {
         const g = x.area === 'deck' && groups.find((y) => y.area === 'deck' && y.c.id === x.c.id);
         if (g) g.uids.push(x.uid);
-        else groups.push({ key: 'g' + groups.length, area: x.opp ? 'oppField' : x.area, c: x.c, inst: x.inst, opp: x.opp, uids: [x.uid] });
+        else groups.push({ key: 'g' + groups.length, area: x.opp ? 'oppField' : x.area, c: x.c, inst: x.inst, opp: x.opp, hidden: !!x.hidden, uids: [x.uid] });
       });
       const secs = [];
       groups.forEach((g) => { if (!secs.includes(g.area)) secs.push(g.area); });
-      const tile = (g) => '<div class="slot-card' + (g.opp ? ' ax-opp' : '') + '" data-pick="' + g.key + '" role="button" tabindex="0">'
-        + (g.inst && g.inst.token ? tokenTile(g.c) : view.tile(g.c)) + (g.opp ? '<span class="ax-who">Rival</span>' : '')
+      // VS: una carta boca abajo del rival es solo un dorso ("Boca abajo"), sin nombre, código ni imagen
+      const face = (g) => (g.hidden ? '<div class="card back"></div><span class="ax-hid">Boca abajo</span>'
+        : g.inst && g.inst.token ? tokenTile(g.c) : view.tile(g.c));
+      const tile = (g) => '<div class="slot-card' + (g.opp ? ' ax-opp' : '') + '" data-pick="' + g.key + '" role="button" tabindex="0"'
+        + (g.hidden ? ' aria-label="Rival: carta boca abajo"' : '') + '>'
+        + face(g) + (g.opp ? '<span class="ax-who">Rival</span>' : '')
         + (g.uids.length > 1 ? '<span class="ax-n">×' + g.uids.length + '</span>' : '') + '</div>';
       const body = '<p class="hint">' + esc(describe(o.action)) + '</p>' + (o.action.text ? '<p class="fx-src">' + esc(o.action.text) + '</p>' : '')
         + secs.map((sec) => {
@@ -1956,7 +2059,7 @@
     }
     const prep = { option, cost: [], costManual: [], targets: [], targetManual: [] };
     const used = new Set(cardAct ? [uid] : []);
-    const cardsOf = (uids) => uids.map((u) => { const x = find(u); return x ? x.c : oppEntry(u) ? db.get(oppEntry(u).id) : null; }).filter(Boolean);
+    const cardsOf = (uids) => uids.map((u) => { const x = find(u); return x ? x.c : oppEntry(u) ? oppCard(oppEntry(u)) : null; }).filter(Boolean);
     const costCards = () => cardsOf(prep.cost.flatMap((s) => s.uids));
     const toManual = (a) => { prep.costManual.push(a.text || describe(a)); };
     for (const a of cost) {
@@ -2015,7 +2118,8 @@
         if (!Array.isArray(r)) { prep.targetManual.push(a.text || ''); continue; }
         pick = r.map((u) => cands.find((x) => x.uid === u));
       }
-      pick.forEach((x) => { used.add(x.uid); prep.targets.push({ uid: x.uid, id: x.c.id, opp: x.opp }); });
+      // VS: un objetivo boca abajo del rival queda sin código (id 0, hidden)
+      pick.forEach((x) => { used.add(x.uid); prep.targets.push(Object.assign({ uid: x.uid, id: x.hidden ? 0 : x.c.id, opp: x.opp }, x.hidden ? { hidden: true } : {})); });
     }
     if (!alive()) return;
     // Lo que las reglas digan de pagar así (Artifact Lancea: nadie destierra)
@@ -2061,7 +2165,7 @@
   function costRefs(prep) {
     const steps = prep.cost.filter((x) => x.uids.length);
     const chosen = steps.filter((x) => x.a.refers !== 'this');
-    const idOf = (u) => { const x = find(u); const c = x ? x.c : oppEntry(u) ? db.get(oppEntry(u).id) : null; return c ? c.id : 0; };
+    const idOf = (u) => { const x = find(u); const c = x ? x.c : oppEntry(u) ? oppCard(oppEntry(u)) : null; return c ? c.id : 0; };
     return {
       uids: steps.flatMap((x) => x.uids),
       ids: (chosen.length ? chosen : steps).flatMap((x) => x.uids).map(idOf).filter(Boolean),
@@ -2071,7 +2175,7 @@
   function autoLink(L, uid, prep, refs, paidUids) {
     const f = find(uid);
     const locOf = (t) => {
-      if (t.opp) return { uid: t.uid, id: t.id, area: 'oppField', zone: null, opp: true };
+      if (t.opp) return Object.assign({ uid: t.uid, id: t.id, area: 'oppField', zone: null, opp: true }, t.hidden ? { hidden: true } : {});
       const x = find(t.uid);
       return { uid: t.uid, id: t.id, area: x ? x.loc.area : null, zone: x && x.loc.zone || null, opp: false };
     };
@@ -2261,7 +2365,7 @@
         const locs = arr(l.auto.targetLocs);
         if (!locs.length) return { manual: true }; // el objetivo no se eligió aquí (a mano o del rival)
         const ok = locs.filter((t) => (t.opp ? !!oppEntry(t.uid) : at(find(t.uid), t)));
-        if (!ok.length) return lost(listEs(locs.map((t) => q(nameById(t.id)))), locs[0].area);
+        if (!ok.length) return lost(listEs(locs.map((t) => (t.hidden ? 'una carta boca abajo del rival' : q(nameById(t.id))))), locs[0].area);
         return { uids: ok.map((t) => t.uid) };
       }
       if (a.refers === 'previous') {
@@ -2346,7 +2450,8 @@
       move.bottom = bottom;
     }
     const mine = [], vs = {}, done = [];
-    const HOW = { destroy: 'destroy', banish: 'banish', returnHand: 'hand' };
+    // (En VS también mandar al Cementerio y barajar en el Mazo: YGO.duel.leave lo hace sin nombrar lo que está boca abajo)
+    const HOW = isVs() ? { destroy: 'destroy', banish: 'banish', returnHand: 'hand', send: 'send', returnDeck: 'deck' } : { destroy: 'destroy', banish: 'banish', returnHand: 'hand' };
     for (const u of uids) {
       if (!locate(u) && oppEntry(u)) {
         // Del campo del rival: lo hace YGO.bot (anota su línea con "(por CLn «X»)")
@@ -2700,6 +2805,11 @@
   function changePosition(uid, to) {
     const f = find(uid);
     if (!f) return;
+    // VS: un monstruo que ya atacó este turno no cambia de posición
+    if (isVs()) {
+      const pv = vsCall('positionVerdict', [uid], null);
+      if (pv && typeof pv === 'object' && pv.ok === false) { toast(pv.why || 'No puede cambiar de posición ahora.', 'bad'); return; }
+    }
     const v = checkPosition(uid, to);
     gate(v, () => {
       snapshot();
@@ -2727,6 +2837,8 @@
     const errors = [];
     const t = S.turnState;
     if (S.chain.length) errors.push('Hay una cadena sin resolver: resuélvela antes de cambiar de fase.');
+    // VS: tu ataque declarado espera el cálculo de daño (si sigues igual, el ataque no sigue y queda en el registro)
+    if (isVs() && t.mine && S.vs.win && S.vs.win.kind === 'mine-attack') errors.push('Tienes un ataque declarado: pulsa «Calcular daño» o «El ataque no sigue».');
     if (target) {
       const keys = phases().map((p) => p[0]);
       if (keys.indexOf(target) < keys.indexOf(t.phase)) errors.push('No se puede volver a una fase anterior.');
@@ -2734,22 +2846,46 @@
     }
     return { ok: !errors.length, errors, warnings: [] };
   }
-  function setPhase(key) {
+  /* VS: o.rival (lo pide vs.js en el turno del rival) no pasa por la ventana de "Jugada ilegal". En VS, en el turno del rival
+   * o con el duelo terminado, tus botones de fase y turno no hacen nada. */
+  const rivalOpt = (o) => !!(o && typeof o === 'object' && o.rival === true);
+  function vsBlocked(rv) {
+    if (rv || !isVs()) return false;
+    if (S.vs.over) { toast('El duelo terminó'); return true; }
+    if (!S.turnState.mine) { toast('Es el turno del rival'); return true; }
+    return false;
+  }
+  /** VS: cambias de fase con tu ataque declarado sin calcular el daño: no sigue (vs.js lo anota en el registro). */
+  const vsDropAttack = () => { if (isVs()) vsCall('dropAttack'); };
+  /** VS: antes de pasar tu turno, el límite de mano (vs.js descarta hasta 6 y sigue con cont). */
+  function vsBeforePass(cont) {
+    if (!isVs()) { cont(); return; }
+    vsCall('beforePass', [cont], () => cont());
+  }
+  function setPhase(key, o) {
+    const rv = rivalOpt(o);
+    if (vsBlocked(rv)) return;
     if (key === S.turnState.phase) return;
     const v = phaseVerdict(key);
-    gate(v, () => {
+    const go = () => {
       snapshot();
+      if (!rv) vsDropAttack();
       run('setPhase', [S, key], () => { S.turnState.phase = key; });
       ensureState();
       pushLog({ kind: 'phase', text: 'Fase: ' + phaseName(S.turnState.phase) }, v);
       afterPlay(v);
       botEvent({ type: 'phase', phase: S.turnState.phase });
-    });
+    };
+    if (rv) go();
+    else gate(v, go);
   }
-  function nextPhase() {
+  function nextPhase(o) {
+    const rv = rivalOpt(o);
+    if (vsBlocked(rv)) return;
     const v = phaseVerdict(null);
-    gate(v, () => {
+    const go = () => {
       snapshot();
+      if (!rv) vsDropAttack();
       const turn = S.turnState.turn;
       const mine = S.turnState.mine;
       run('nextPhase', [S], () => localNextPhase(S));
@@ -2758,19 +2894,29 @@
       pushLog({ kind: 'phase', text: t.turn !== turn ? 'Empieza el turno ' + t.turn + ' (' + (t.mine ? 'tu turno' : 'turno rival') + ')' : 'Fase: ' + phaseName(t.phase) }, v);
       afterPlay(v);
       botEvent({ type: 'phase', phase: t.phase });
+      if (isVs()) { if (t.turn !== turn) vsCall('turnChanged'); return; }
       // Después de tu Fase Final empieza el turno rival: termina el intento
       if (t.turn !== turn && mine && oppOn()) endAttempt();
-    });
+    };
+    // VS: desde tu Fase Final se pasa el turno (antes, el límite de mano)
+    const passes = isVs() && !rv && S.turnState.phase === 'end';
+    if (rv) go();
+    else gate(v, () => (passes ? vsBeforePass(go) : go()));
   }
-  function passTurn() {
+  function passTurn(o) {
+    const rv = rivalOpt(o);
+    if (vsBlocked(rv)) return;
     const v = phaseVerdict(null);
-    gate(v, () => {
+    const go = () => {
       const mine = S.turnState.mine;
       snapshot();
+      if (!rv) vsDropAttack();
       // Eslabones del rival que quedan sin resolver: su carta deja la cadena sin hacer nada (no "te cortó")
       if (oppOn() && S.chain.some((l) => l && l.owner === 'opp' && !l.done)) {
         oppNotes(botCall('observe', [S, { type: 'resolved', abandoned: true, chain: JSON.parse(JSON.stringify(S.chain)) }], []));
       }
+      // VS: lo mismo para los eslabones de la IA (sus Mágicas/Trampas ya resueltas van a su Cementerio)
+      if (isVs() && S.chain.length) vsLogs(aiCall('afterChain', [S, S.chain, { abandoned: true }], []));
       pushLog({ kind: 'phase', text: 'Termina el turno ' + S.turnState.turn }, v);
       run('passTurn', [S], () => localPassTurn(S));
       ensureState();
@@ -2781,9 +2927,12 @@
       afterPlay(v);
       toast('Turno ' + S.turnState.turn + ': ' + (S.turnState.mine ? 'tu turno' : 'turno rival'), 'ok');
       botEvent({ type: 'phase', phase: S.turnState.phase });
+      if (isVs()) { vsCall('turnChanged'); return; }
       // Pasar tu turno contra el rival termina el intento: se guarda y se ve el resumen
       if (mine && oppOn()) endAttempt();
-    });
+    };
+    if (rv) go();
+    else gate(v, () => vsBeforePass(go));
   }
 
   /* ---------- Acciones de la carta elegida ---------- */
@@ -2797,9 +2946,15 @@
     const extraMon = db.isExtra(c);
     const add = (label, fn, kind) => acts.push({ label, fn, kind });
     const fx = () => openEffects(uid);
+    // VS: "Atacar" (primero) para tu monstruo que puede atacar ahora (lo decide vs.js)
+    const vsActs = () => {
+      if (!isVs() || !isTop || !isMonsterZone(loc.zone)) return;
+      arr(vsCall('actions', [uid], [])).forEach((a) => { if (a && a.label && typeof a.fn === 'function') acts.push({ label: String(a.label), fn: a.fn, kind: a.kind || '' }); });
+    };
 
     // Ficha (Primal Being Token): no tiene efectos; solo cambia de posición, se mueve o deja el campo (y desaparece)
     if (inst.token) {
+      vsActs();
       if (isTop && isMonsterZone(loc.zone)) add(inst.def ? 'Cambiar a ATK' : 'Cambiar a DEF', () => changePosition(uid, inst.def ? 'atk' : 'def'), 'primary');
       acts.push({ group: 'Movimientos manuales' });
       add('Mover a una zona…', () => startPending('move', uid));
@@ -2821,6 +2976,7 @@
       } else if (loc.area === 'gy' || loc.area === 'ban') add('Activar efecto…', fx, 'primary');
     } else if (isTop) {
       if (isMonsterZone(loc.zone)) {
+        vsActs();
         if (inst.faceDown) add('Voltear boca arriba', () => changePosition(uid, 'flip'), 'primary');
         else {
           add('Activar efecto…', fx, 'primary');
@@ -3002,6 +3158,12 @@
     // La Zona Extra que ocupa el rival (Angelechy Destrier): se ve su carta y, sin nada en curso, se puede quitar
     const tk = emzTaken(zone);
     if (tk && !S.zones[zone].length) {
+      // VS: es una carta del rival (atacarla, verla, quitarla…): lo decide vs.js con su zona (su asiento)
+      if (isVs()) {
+        if (pending) toast(takenText(tk));
+        else vsCall('clickRival', [duelCall('mirror', [zone], zone)]);
+        return;
+      }
       if (pending || selected || !takenBy(tk)) toast(takenText(tk));
       else openOppField(takenBy(tk).uid);
       return;
@@ -3183,6 +3345,11 @@
     const own = stack.length && isOppOwned(stack[0]) ? '<span class="own-badge" title="Carta del rival: vuelve a él cuando deja el campo">Rival</span>' : '';
     // Zona Extra ocupada por el rival (Angelechy Destrier): su carta, que no es tuya (no es material ni se mueve)
     const tk = !stack.length && emzTaken(z);
+    // VS: su monstruo en la Zona Extra compartida lo dibuja vsview (sin uid; boca abajo, solo el dorso)
+    if (tk && isVs()) {
+      return viewCall('emzCell', [S, z, ctx.ui || {}], () => '<div class="zone-slot z-emz opp-taken" data-zone="' + z + '" tabindex="0" aria-label="'
+        + esc(label + ': la ocupa el rival') + '"><span class="zl">Rival</span></div>');
+    }
     if (tk) {
       const x = takenBy(tk);
       const c = db.get(x ? x.id : idByName(tk.source || ''));
@@ -3245,6 +3412,9 @@
   function render() {
     if (!S) return;
     ensureState();
+    // VS: zonas del rival al día y su Zona Extra bloqueada en tu marco (YGO.duel.sync)
+    const vs = isVs();
+    if (vs) duelCall('sync', [S]);
     flushRedirects();
     if (sweepTokens()) toast('Las fichas desaparecen cuando dejan el campo');
     if (pending && !locate(pending.uid)) clearPending(false);
@@ -3254,16 +3424,21 @@
     $$('#fd-order button').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.order === 'second') === second)));
     const st = ['Zona de Péndulo / M/T', 'M/T', 'M/T', 'M/T', 'Zona de Péndulo / M/T'];
     const ctx = boardCtx();
-    $('#board').innerHTML =
-      '<div class="cell spacer"></div><div class="cell spacer"></div>' + zoneHtml('emz0', 'Zona de Monstruo Extra', ctx)
+    // VS: arriba sus dos filas (Mazo/M/T/Extra y Cementerio/Monstruos/Campo) y su destierro en la primera celda de la fila del medio
+    const ui = vs ? vsUi() : null;
+    if (vs) ctx.ui = ui;
+    $('#board').innerHTML = (vs ? viewCall('rows', [S, ui], '') + viewCall('cell', [S, 'ban', ui], '<div class="cell spacer"></div>') : '<div class="cell spacer"></div>')
+      + '<div class="cell spacer"></div>' + zoneHtml('emz0', 'Zona de Monstruo Extra', ctx)
       + '<div class="cell spacer"></div>' + zoneHtml('emz1', 'Zona de Monstruo Extra', ctx) + '<div class="cell spacer"></div>' + pileHtml('ban')
       + zoneHtml('fz', 'Zona de Campo', ctx) + MZ.map((z) => zoneHtml(z, 'Monstruo', ctx)).join('') + pileHtml('gy')
       + pileHtml('extra') + ST.map((z, i) => zoneHtml(z, st[i], ctx)).join('') + pileHtml('deck');
     $('#fd-hand').innerHTML = S.hand.length ? S.hand.map((x) => tileFor(x, true)).join('') : '<p class="ht-empty">Tu mano está vacía.</p>';
     $('#fd-hand-count').textContent = S.hand.length;
     $('#fd-hand-wrap').classList.toggle('picking', !!(pending && pending.kind === 'summon'));
-    $('#fd-undo').disabled = !history.length;
+    // (En VS, Deshacer queda apagado en el piso: lo que hizo o mostró el rival no se deshace)
+    $('#fd-undo').disabled = !canUndo();
     $('#fd-lp').value = S.lp;
+    renderVsChrome(vs, ui);
     renderTurn();
     renderOpp();
     renderPending();
@@ -3271,6 +3446,32 @@
     renderLog();
     renderSide();
     renderPile();
+    if (vs) vsCall('render');
+  }
+  /** Modo VS o Prueba: clases del tablero, el selector Prueba/VS, tus LP junto a la mano y la barra del VS. */
+  function renderVsChrome(vs, ui) {
+    $('#board').classList.toggle('vs', vs);
+    const fm = $('.fieldmode');
+    if (fm) fm.classList.toggle('vs', vs);
+    const ready = vsReady();
+    $$('#fd-vmode [data-vmode]').forEach((b) => {
+      b.setAttribute('aria-pressed', String((b.dataset.vmode === 'vs') === vs));
+      if (b.dataset.vmode !== 'vs') return;
+      b.disabled = !ready;
+      if (!ready) b.title = VS_OFF;
+    });
+    const lp = $('#vs-mylp');
+    if (lp) {
+      lp.hidden = !vs;
+      if (vs) {
+        lp.textContent = viewCall('myLp', [S], 'LP ' + S.lp);
+        const fx = ui && ui.lpFx && ui.lpFx.me;
+        lp.classList.toggle('vs-hit', fx === 'hit');
+        lp.classList.toggle('vs-gain', fx === 'gain');
+      }
+    }
+    const bar = $('#fd-vs');
+    if (bar && !vs) { bar.hidden = true; bar.innerHTML = ''; } else if (bar) bar.hidden = false;
   }
 
   function renderTurn() {
@@ -3280,11 +3481,29 @@
     $('#fd-turn-who').textContent = t.mine ? 'Tu turno' : 'Turno rival';
     $('#fd-phases').innerHTML = phases().map(([k, label]) => '<button type="button" data-phase="' + esc(k) + '" aria-pressed="' + (k === t.phase) + '">'
       + '<span class="ph-l">' + esc(label) + '</span><span class="ph-s">' + esc(PHASE_SHORT[k] || label) + '</span></button>').join('');
-    const used = (Number(t.normalSummons) || 0) >= 1;
-    $('#fd-ns').innerHTML = 'Invocación Normal: <b class="' + (used ? 'ns-used' : 'ns-free') + '">' + (used ? 'usada' : 'disponible') + '</b>';
+    // VS, turno del rival: la Invocación Normal del rival (sus contadores, YGO.duel.tsOf)
+    const nsT = isVs() && !t.mine ? (duelCall('tsOf', [S], null) || t) : t;
+    const used = (Number(nsT.normalSummons) || 0) >= 1;
+    $('#fd-ns').innerHTML = 'Invocación Normal' + (nsT !== t ? ' del rival' : '') + ': <b class="' + (used ? 'ns-used' : 'ns-free') + '">' + (used ? 'usada' : 'disponible') + '</b>';
     $('#fd-strict').checked = strict();
     renderAutoSwitch();
     $('#fd-log-btn').textContent = 'Registro (' + S.log.length + ')';
+    // VS: sin intentos; en el turno del rival (o con el duelo terminado) tus fases y tu turno no se tocan; Rendirse a la vista
+    const vs = isVs();
+    const cc = $('#fd-concede');
+    if (cc) { cc.hidden = !vs; cc.disabled = !!(vs && S.vs.over); }
+    if (vs) {
+      $('#fd-end').hidden = true;
+      const why = S.vs.over ? 'El duelo terminó' : !t.mine ? 'Es el turno del rival' : '';
+      if (!t.mine) $('#fd-turn-who').textContent = 'Turno del rival';
+      [...$$('#fd-phases button'), $('#fd-next-phase'), $('#fd-pass')].forEach((b) => {
+        b.disabled = !!why;
+        if (why) b.title = why; else b.removeAttribute('title');
+      });
+      return;
+    }
+    // (Al volver de un duelo VS: los botones de turno quedan como siempre)
+    ['#fd-next-phase', '#fd-pass'].forEach((s) => { const b = $(s); b.disabled = false; if (/turno del rival|duelo terminó/.test(b.title)) b.removeAttribute('title'); });
     // "Terminar intento": contra el rival o si el mazo tiene campo objetivo
     $('#fd-end').hidden = !(oppOn() || attemptTarget().length);
   }
@@ -3432,7 +3651,7 @@
         + (opp ? '<span class="cl-who">Rival</span>' : '') + '<b>' + esc(nameById(l.id)) + '</b>'
         + (l.scale ? ' <span class="cl-fx">Escala</span>' : !opp && l.effectIndex ? ' <span class="cl-fx">efecto ' + l.effectIndex + '</span>' : '')
         + (l.auto ? ' <span class="cl-auto" title="Se hace solo al resolverse (modo Automático)">Auto</span>' : '')
-        + (l.auto && arr(l.auto.targetLocs).length ? '<span class="cl-tgt">Objetivo: ' + esc(listEs(arr(l.auto.targetLocs).map((t) => q(nameById(t.id))))) + '</span>' : '')
+        + (l.auto && arr(l.auto.targetLocs).length ? '<span class="cl-tgt">Objetivo: ' + esc(listEs(arr(l.auto.targetLocs).map((t) => (t.hidden ? 'una carta boca abajo del rival' : q(nameById(t.id)))))) + '</span>' : '')
         + (neg ? '<span class="cl-neg">' + (neg.fizzle ? 'Sin su carta' : 'Negado') + (neg.by ? ' · por ' + esc(byText(neg.by)) : '') + '</span>'
           + (opp ? '' : '<span class="cl-hint">' + (neg.fizzle ? 'Ya no puede usar la carta desterrada' : 'No hagas lo que dice este efecto') + '</span>') : '')
         + (l.text ? '<span class="cl-text">' + esc(l.text) + '</span>' : '') + '</span>'
@@ -3577,11 +3796,16 @@
     if (!oppOn()) return null;
     const notes = arr(botCall('observe', [S, ev], []));
     oppNotes(notes);
-    const r = S.turnState.mine && !pending ? botCall('consider', [S, ev], null) : null;
+    // VS: el rival responde solo si lo pediste (#su-responds) y el duelo sigue; si sus handtraps no, sus Trampas colocadas (YGO.ai)
+    const vs = isVs();
+    const asks = S.turnState.mine && !pending && (!vs || (S.vs.responds && !S.vs.over));
+    let r = asks ? botCall('consider', [S, ev], null) : null;
+    if (vs && asks && (!r || typeof r !== 'object')) r = aiCall('consider', [S, ev], null);
     if (!r || typeof r !== 'object') { if (notes.length) render(); return null; }
     const before = S.chain.length;
-    const e = botCall('commit', [S, r], null);
+    const e = vs && r.ai ? aiCall('commit', [S, r], null) : botCall('commit', [S, r], null);
     if (!e && S.chain.length === before) { if (notes.length) render(); return null; }
+    if (vs) lockUndo(); // lo que el rival hizo (o mostró) al responder no se deshace
     if (S.chain.length > before) {
       const l = S.chain[S.chain.length - 1];
       l.owner = 'opp';
@@ -3657,9 +3881,37 @@
           let went;
           quietGy = op.uid; // esta línea del registro ya dice si quedó desterrada
           try { went = leaveField(op.uid); } finally { quietGy = null; }
-          pushLog({ kind: 'opp', text: q(f.c.name) + (mon ? ' es destruido' : ' es destruida') + ' (por ' + by + ')' + (went === 'extra' ? ': va boca arriba al Extra Deck' : went === 'gone' ? ' y desaparece'
+          // (VS: battle, destruido en batalla por un monstruo del rival)
+          pushLog({ kind: 'opp', text: q(f.c.name) + (mon ? ' es destruido' : ' es destruida') + (op.battle ? ' en batalla' + (op.by ? ' (por ' + by + ')' : '') : ' (por ' + by + ')') + (went === 'extra' ? ': va boca arriba al Extra Deck' : went === 'gone' ? ' y desaparece'
             : went === 'opp' ? ': vuelve al rival (es su carta)' : went === 'ban' ? (mon ? ': queda desterrado' : ': queda desterrada') + ' en vez de ir al Cementerio' : '') });
           if (went === 'extra') toast(PEND_TOAST);
+        } else if (op.op === 'send') {
+          // VS (YGO.ai): una carta de tu campo va al Cementerio (sin destruirla)
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'field' || f.loc.index !== 0) return;
+          let went;
+          quietGy = op.uid;
+          try { went = leaveField(op.uid); } finally { quietGy = null; }
+          pushLog({ kind: 'opp', text: q(f.c.name) + ' va al Cementerio (por ' + by + ')' + (went === 'extra' ? ': va boca arriba al Extra Deck' : went === 'gone' ? ' y desaparece'
+            : went === 'opp' ? ': vuelve al rival (es su carta)' : went === 'ban' ? ': ' + (isMonsterZone(f.loc.zone) ? 'queda desterrado' : 'queda desterrada') + ' en vez de ir al Cementerio' : '') });
+          if (went === 'extra') toast(PEND_TOAST);
+        } else if (op.op === 'toDeck') {
+          // VS (YGO.ai): de tu campo o tu Cementerio al Mazo (barajado, o abajo con bottom); los del Extra Deck, al Extra Deck
+          const f = find(op.uid);
+          if (!f || !(f.loc.area === 'gy' || f.loc.area === 'ban' || (f.loc.area === 'field' && f.loc.index === 0))) return;
+          if (!moveNow(op.uid, 'deck', { noSnap: true, quiet: true, shuffle: !op.bottom, bottom: !!op.bottom })) return;
+          pushLog({ kind: 'opp', text: q(f.c.name) + (lastWent === 'extra' ? ' vuelve a tu Extra Deck' : lastWent === 'gone' ? ' deja el campo y desaparece'
+            : lastWent === 'opp' ? ' vuelve al rival (es su carta)' : op.bottom ? ' va al fondo de tu Mazo' : ' vuelve a tu Mazo (barajado)') + ' (por ' + by + ')' });
+        } else if (op.op === 'position') {
+          // VS (YGO.ai): cambia la posición de tu monstruo (to: 'atk' | 'def' | 'set')
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'field' || f.loc.index !== 0 || !isMonsterZone(f.loc.zone)) return;
+          const to = ['atk', 'def', 'set'].includes(op.to) ? op.to : f.inst.def ? 'atk' : 'def';
+          setPosition(f.inst, to);
+          pushLog({ kind: 'opp', text: q(f.c.name) + ' pasa a ' + (to === 'set' ? 'DEF boca abajo' : to === 'def' ? 'DEF' : 'ATK') + ' (por ' + by + ')' });
+        } else if (op.op === 'note') {
+          // VS (YGO.ai): una línea del rival tal cual (sin quitar repetidas)
+          if (op.text) pushLog({ kind: 'opp', text: String(op.text) });
         } else if (op.op === 'banish') {
           // De tu Cementerio (D.D. Crow, Bystial Magnamhut) o del campo (Dominus Spark: sus materiales Xyz van al Cementerio)
           const f = find(op.uid);
@@ -3854,6 +4106,8 @@
   /* ---------- Franja del rival (sobre el tablero) ---------- */
   function renderOpp() {
     const box = $('#fd-opp');
+    // VS: su mazo, sus LP, el dorso de su mano y cuántas cartas tiene (YGO.vsview.strip; nada oculto)
+    if (isVs()) { box.className = 'fd-opp vs'; box.innerHTML = viewCall('strip', [S, vsUi()], ''); return; }
     const st = attemptStats();
     const statsBtn = '<button type="button" class="opp-btn opp-stats" data-opp="stats">Intentos'
       + (st && st.total ? ' · ' + st.total + (st.pct !== null ? ' (' + game.pct(st.pct) + ')' : '') : '') + '</button>';
@@ -3910,6 +4164,7 @@
   function openOppField(uid) {
     const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
     if (!x) return;
+    if (isVs()) { openOppFieldVs(x); return; }
     const name = nameById(x.id);
     const can = !!(bot() && typeof bot().removeFromField === 'function');
     const xc = db.get(x.id);
@@ -3923,12 +4178,44 @@
     chooser('Campo del rival · ' + name, (x.def ? 'En DEF. ' : '') + (x.owner === 'player' ? 'Es tu carta: si deja el campo, queda desterrada. ' : '')
       + (can ? 'Si un efecto tuyo la quita del campo, elige qué le pasa.' : 'El rival no puede quitarla del campo en esta versión.'), items);
   }
-  const REMOVE_TITLE = { destroy: 'No se puede destruir', banish: 'No se puede desterrar', hand: 'No vuelve a la mano' };
-  const refuseRemove = (how, name, why) => openDialog(REMOVE_TITLE[how] + ' · ' + name, '<p class="hint">' + esc(why) + '</p>', [{ label: 'Entendido', kind: 'primary' }]);
+  /** VS (§1.11): lo que un efecto tuyo le hace a su carta. Boca abajo no se nombra ni se puede ver; todo pasa por YGO.duel
+   * (texto sin lo oculto), queda en el registro "(por un efecto tuyo)" y "Deshacer" lo revierte. */
+  function openOppFieldVs(x) {
+    const uid = x.uid;
+    const hid = !!x.faceDown;
+    const c = hid ? null : db.get(x.id);
+    const mon = [...EMZ, ...MZ].includes(x.zone) && !x.asSpell;
+    const items = [
+      { label: 'Destruir', kind: 'primary', action: () => removeOppCard(uid, 'destroy') },
+      { label: 'Desterrar', action: () => removeOppCard(uid, 'banish') },
+      // Boca abajo no se dice si es del Extra Deck (YGO.duel la manda donde corresponde)
+      { label: c && db.isExtra(c) ? 'Devolver al Extra Deck' : 'Devolver a la mano', action: () => removeOppCard(uid, 'hand') },
+      { label: 'Devolver al Mazo', action: () => removeOppCard(uid, 'deck') },
+      { label: 'Mandar al Cementerio', action: () => removeOppCard(uid, 'send') },
+    ];
+    if (mon && !hid) {
+      items.push({ label: 'Negar sus efectos este turno', action: () => vsOppDo(() => duelCall('negate', [S, uid, 'un efecto tuyo'], null)) });
+      if (!(c && c.type & T.LINK)) items.push({ label: 'Cambiar posición', action: () => vsOppDo(() => duelCall('position', [S, uid, x.def ? 'atk' : 'def', { effect: true, by: 'un efecto tuyo' }], null)) });
+    }
+    if (c) items.push({ label: 'Ver la carta', kind: 'link-btn', action: () => showCard(x.id) });
+    chooser('Campo del rival · ' + (hid ? 'Carta boca abajo' : c ? c.name : 'Carta'),
+      (hid ? (mon ? 'Monstruo boca abajo' + (x.def ? ' en DEF' : '') + '. ' : 'Carta colocada boca abajo. ') : mon ? (x.def ? 'En DEF. ' : 'En ATK. ') : '')
+      + (x.owner === 'player' ? 'Es tu carta: si deja el campo, vuelve a ti. ' : '') + 'Si un efecto tuyo la afecta, elige qué le pasa.', items);
+  }
+  /** VS: negar o cambiar de posición su carta (YGO.duel), con foto para "Deshacer". fn → { ok, why, text } */
+  function vsOppDo(fn) {
+    snapshot();
+    const r = fn();
+    if (!r || !r.ok) { history.pop(); toast((r && r.why) || 'No se pudo hacer.', 'bad'); return; }
+    if (r.text) pushLog({ kind: 'manual', text: 'Movimiento manual: ' + r.text });
+    render();
+  }
+  const REMOVE_TITLE = { destroy: 'No se puede destruir', banish: 'No se puede desterrar', hand: 'No vuelve a la mano', deck: 'No vuelve al Mazo', send: 'No va al Cementerio' };
+  const refuseRemove = (how, name, why) => openDialog((REMOVE_TITLE[how] || 'No se puede') + ' · ' + name, '<p class="hint">' + esc(why) + '</p>', [{ label: 'Entendido', kind: 'primary' }]);
   function removeOppCard(uid, how) {
     const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
     if (!x) return;
-    const name = nameById(x.id);
+    const name = hiddenOpp(x) ? 'Carta boca abajo' : nameById(x.id);
     // Con «Artifact Lancea» nadie destierra: tu efecto tampoco (no cambia nada)
     const nb = how === 'banish' ? noBanish() : null;
     if (nb) { refuseRemove(how, name, noBanishText(nb)); return; }
@@ -3947,9 +4234,24 @@
   function removeOppCardNow(uid, how, by) {
     const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
     if (!x) return { ok: false, why: 'Esa carta ya no está en el campo del rival.' };
-    const name = nameById(x.id);
     const nb = how === 'banish' ? noBanish() : null;
     if (nb) return { ok: false, why: noBanishText(nb) };
+    // VS: YGO.duel.leave (sus materiales, Péndulos, fichas y tus cartas que tenía; el texto no nombra lo que sigue oculto)
+    if (isVs()) {
+      const wasHidden = !!x.faceDown;
+      const r = duelCall('leave', [S, uid, how, by || 'un efecto tuyo'], null);
+      if (!r || typeof r !== 'object') return { ok: false, why: 'No se pudo mover esa carta del rival.' };
+      if (!r.ok) return { ok: false, why: String(r.why || 'El rival no permite este movimiento.') };
+      if (r.text) pushLog(by ? { kind: 'auto', text: String(r.text) } : { kind: 'manual', text: 'Movimiento manual: ' + r.text });
+      if (arr(r.ops).length) oppNotes([{ ops: r.ops, by: by || 'un efecto tuyo' }]);
+      // Su carta boca abajo quedó a la vista (Cementerio, desterrada boca arriba…): ya la viste, no se deshace
+      if (wasHidden) {
+        const f = duelCall('findRival', [S, uid], null);
+        if (f && duelCall('isPublic', [f.where, f.inst], false)) lockUndo();
+      }
+      return { ok: true };
+    }
+    const name = nameById(x.id);
     const res = arr(botCall('removeFromField', [S, uid, how], null));
     // El rival lo rechaza (p. ej. Angelechy Bastion: las demás «Angelechy» no pueden ser destruidas): no cambia nada
     const no = res.find((n) => n && n.refused);
@@ -3969,64 +4271,131 @@
   }
 
   /* ---------- Nuevo duelo: turno, rival y lista de handtraps ---------- */
-  /** opts.deck: mazo nuevo (al cambiar el selector). state: lo elegido (al volver de la lista de handtraps).
+  /** opts.deck: mazo nuevo (al cambiar el selector). opts.vs: tipo de duelo elegido (true VS, false Prueba; sin él, el del
+   * duelo actual). state: lo elegido (al volver de la lista de handtraps).
    * Si hay jugadas anotadas, el título avisa que se borran. Lo elegido se recuerda en las preferencias. */
   function openSetup(opts, state) {
     opts = opts || {};
     const B = bot();
     if (!state) freshPrefs();
+    // Modo VS: solo si están sus cuatro módulos (si no, el botón VS queda apagado)
+    const ready = vsReady();
     const st = state || {
       second: !!prefs.fieldSecond, count: normCount(prefs.botCount), mode: prefs.botMode === 'aggressive' ? 'aggressive' : 'smart',
       pool: poolOf(prefs.botPool), same: false,
+      vs: opts.vs !== undefined ? !!opts.vs : S ? isVs() : !!prefs.fieldVs,
     };
+    if (!ready) st.vs = false;
     // "Jugar contra handtraps…" de la franja: ya viene con rival (2–3 al azar si no había)
     if (!state && opts.wantBot && st.count === 0) st.count = '2-3';
     const busy = hasPlays();
     const canSame = !opts.deck && !!(S && S.start && d && S.start.deckId === d.id);
     const seg = (id, key, items, cur) => '<div class="seg" id="' + id + '" role="group">' + items.map(([v, l]) => '<button type="button" data-' + key + '="' + v
       + '" aria-pressed="' + (String(v) === String(cur)) + '">' + l + '</button>').join('') + '</div>';
+    // VS: sus filas las arma js/vs.js (tu mazo, el del rival, quién empieza, ritmo...); cfg: lo de antes o lo recordado
+    const myDeck = opts.deck || d;
+    const vsCfg = st.vsCfg || {
+      deck: myDeck, myDeckId: myDeck ? myDeck.id : null, rivalId: prefs.vsRivalDeckId, firstPref: prefs.vsFirst || 'coin',
+      pace: prefs.vsPace || 'normal', askOnly: prefs.vsAskOnly !== false, responds: prefs.vsResponds !== false,
+    };
+    vsCfg.deck = myDeck;
+    vsCfg.myDeckId = myDeck ? myDeck.id : null;
+    const vsRows = ready ? String(vsCall('setupHtml', [vsCfg], '') || '') : '';
     const body = (busy ? '<p class="setup-warn">Se borra la partida actual: el campo, la cadena y el registro de jugadas.</p>' : '')
-      + (opts.deck ? '<p class="hint">Mazo: <b>' + esc(opts.deck.name) + '</b></p>' : '')
-      + '<div class="field"><span>Turno</span>' + seg('su-turn', 'second', [['0', 'Primero · 5 cartas'], ['1', 'Segundo · 6 cartas']], st.second ? '1' : '0')
+      + '<div class="field su-type"><span>Tipo de duelo</span><div class="seg" id="su-vs" role="group" aria-label="Tipo de duelo">'
+      + '<button type="button" data-vs="0" aria-pressed="' + !st.vs + '">Prueba</button>'
+      + '<button type="button" data-vs="1" aria-pressed="' + st.vs + '"' + (ready ? '' : ' disabled title="' + VS_OFF + '"') + '>VS</button></div>'
+      + '<p class="hint su-note" id="su-vs-note"></p></div>'
+      + (opts.deck ? '<p class="hint su-prueba">Mazo: <b>' + esc(opts.deck.name) + '</b></p>' : '')
+      + '<div class="field su-prueba"><span>Turno</span>' + seg('su-turn', 'second', [['0', 'Primero · 5 cartas'], ['1', 'Segundo · 6 cartas']], st.second ? '1' : '0')
       + '<p class="hint su-note" id="su-turn-note"></p></div>'
-      + '<div class="field"><span>Rival</span>' + (B ? seg('su-count', 'count', [['0', 'Sin handtraps'], ['2', '2'], ['3', '3'], ['2-3', '2–3 al azar']], st.count)
+      + '<div class="field su-prueba"><span>Rival</span>' + (B ? seg('su-count', 'count', [['0', 'Sin handtraps'], ['2', '2'], ['3', '3'], ['2-3', '2–3 al azar']], st.count)
         : '<p class="hint">El rival con handtraps no está disponible.</p>') + '</div>'
-      + (B ? '<div class="field su-bot"><span>Modo</span>' + seg('su-mode', 'mode', [['smart', 'Inteligente'], ['aggressive', 'Agresivo']], st.mode)
+      + (B ? '<div class="field su-bot su-prueba"><span>Modo</span>' + seg('su-mode', 'mode', [['smart', 'Inteligente'], ['aggressive', 'Agresivo']], st.mode)
         + '<p class="hint su-note" id="su-mode-note"></p></div>'
-        + '<p class="su-pool su-bot"><span id="su-pool-sum"></span> <button type="button" class="link-btn" id="su-pool">Editar lista de handtraps…</button></p>' : '')
-      + (canSame ? '<label class="switch su-same"><input type="checkbox" id="su-same"' + (st.same ? ' checked' : '') + '><span>Repetir la mano inicial de este duelo</span></label>' : '');
+        + '<p class="su-pool su-bot su-prueba"><span id="su-pool-sum"></span> <button type="button" class="link-btn" id="su-pool">Editar lista de handtraps…</button></p>' : '')
+      + (canSame ? '<label class="switch su-same su-prueba"><input type="checkbox" id="su-same"' + (st.same ? ' checked' : '') + '><span>Repetir la mano inicial de este duelo</span></label>' : '')
+      // (display: contents: las filas VS siguen el espaciado de .setup)
+      + (vsRows ? '<div id="su-vsrows" class="su-vsrows" style="display: contents">' + vsRows + '</div>' : '');
     openDialog(busy ? '¿Empezar un duelo nuevo?' : 'Nuevo duelo', '<div class="setup">' + body + '</div>', [
       { label: 'Cancelar' },
-      { label: busy ? 'Nuevo duelo' : 'Empezar', kind: 'primary', action: () => startFromSetup(st, opts) },
+      // (keep: en VS, si falta el mazo del rival la ventana sigue abierta)
+      { label: busy ? 'Nuevo duelo' : 'Empezar', kind: 'primary', keep: true, action: () => startFromSetup(st, opts) },
     ]);
     const root = $('#modal-body');
+    if (vsRows) vsCall('bindSetup', [root, vsCfg]);
     const sync = () => {
+      // Tipo de duelo: Prueba (tus filas de siempre) o VS (las de js/vs.js)
+      $$('#su-vs [data-vs]', root).forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.vs === '1') === st.vs)));
+      $('#su-vs-note', root).textContent = st.vs ? 'Duelo completo: el rival juega su turno con su propio mazo.' : 'Practica tu combo; el rival solo tiene handtraps.';
+      $$('.su-prueba', root).forEach((el) => { el.hidden = st.vs; });
+      const vr = $('#su-vsrows', root);
+      if (vr) vr.hidden = !st.vs;
+      // (cada fila .su-vsrow también; la que js/vs.js ya tenía oculta, p. ej. sin historial, sigue oculta al volver a VS)
+      $$('.su-vsrow', root).forEach((el) => {
+        if (st.vs) { if (el.dataset.suHid !== undefined) { el.hidden = el.dataset.suHid === '1'; delete el.dataset.suHid; } }
+        else if (el.dataset.suHid === undefined) { el.dataset.suHid = el.hidden ? '1' : '0'; el.hidden = true; }
+      });
       $$('#su-turn [data-second]', root).forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.second === '1') === st.second)));
       $('#su-turn-note', root).textContent = st.second ? 'Robas la 6ª carta en la Fase de Robo. Es el turno 2: hay Fase de Batalla.'
         : 'Empiezas con 5 cartas: no robas y no hay Fase de Batalla.';
       if (!B) return;
       $$('#su-count [data-count]', root).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.count === String(st.count))));
       $$('#su-mode [data-mode]', root).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === st.mode)));
-      $$('.su-bot', root).forEach((el) => { el.hidden = st.count === 0; });
+      $$('.su-bot', root).forEach((el) => { el.hidden = st.vs || st.count === 0; });
       $('#su-mode-note', root).textContent = st.mode === 'aggressive' ? 'Usa cada handtrap en el primer momento legal.'
         : 'Guarda sus handtraps para el golpe más dañino (tus starters ★), sin dejar pasar todo tu turno.';
       const copies = st.pool.reduce((s, x) => s + x.copies, 0);
       $('#su-pool-sum', root).textContent = 'Lista: ' + nOf(st.pool.filter((x) => x.copies > 0).length, 'carta') + ' · ' + nOf(copies, 'copia') + '.';
     };
-    root.querySelectorAll('[data-second], [data-count], [data-mode]').forEach((b) => b.addEventListener('click', () => {
+    $$('#su-vs [data-vs]', root).forEach((b) => b.addEventListener('click', () => {
+      if (b.disabled) return;
+      st.vs = b.dataset.vs === '1';
+      sync();
+    }));
+    root.querySelectorAll('#su-turn [data-second], #su-count [data-count], #su-mode [data-mode]').forEach((b) => b.addEventListener('click', () => {
       if (b.dataset.second) st.second = b.dataset.second === '1';
       if (b.dataset.count) st.count = normCount(b.dataset.count);
       if (b.dataset.mode) st.mode = b.dataset.mode === 'aggressive' ? 'aggressive' : 'smart';
       sync();
     }));
     const pb = $('#su-pool', root);
-    if (pb) pb.addEventListener('click', () => openPool(st, () => openSetup(opts, st)));
+    // (Lo elegido para VS se guarda en st.vsCfg para volver de la lista igual)
+    if (pb) pb.addEventListener('click', () => { if (vsRows) st.vsCfg = vsReadCfg(root) || st.vsCfg; openPool(st, () => openSetup(opts, st)); });
     const same = $('#su-same', root);
     if (same) same.addEventListener('change', () => { st.same = same.checked; });
     sync();
   }
+  /** VS: lo elegido en las filas de js/vs.js → cfg ({ rival, firstPref, pace, askOnly, responds }) o null. */
+  function vsReadCfg(root) {
+    const cfg = vsCall('readSetup', [root], null);
+    return cfg && typeof cfg === 'object' ? cfg : null;
+  }
+  /** El id del mazo del rival en cfg (rival: mazo o id; o rivalId). */
+  const rivalIdOf = (cfg) => {
+    const r = cfg && (cfg.rival != null ? cfg.rival : cfg.rivalId);
+    return r && typeof r === 'object' ? (r.id != null ? r.id : null) : r != null && r !== '' ? r : null;
+  };
   function startFromSetup(st, opts) {
-    savePref({ fieldSecond: st.second, botCount: st.count, botMode: st.mode, botPool: st.pool });
+    // VS: el rival con el mazo elegido (se recuerda todo para la próxima vez)
+    if (st.vs && vsReady()) {
+      const cfg = vsReadCfg($('#modal-body'));
+      const rid = rivalIdOf(cfg);
+      if (rid == null) { toast('Elige el mazo del rival', 'bad'); return; }
+      closeModal();
+      const patch = { fieldVs: true, vsRivalDeckId: rid };
+      if (['me', 'rival', 'coin'].includes(cfg.firstPref)) patch.vsFirst = cfg.firstPref;
+      if (['normal', 'fast', 'step'].includes(cfg.pace)) patch.vsPace = cfg.pace;
+      if (typeof cfg.askOnly === 'boolean') patch.vsAskOnly = cfg.askOnly;
+      if (typeof cfg.responds === 'boolean') patch.vsResponds = cfg.responds;
+      savePref(patch);
+      if (opts.deck) d = opts.deck;
+      newDuel(null, null, { vs: cfg });
+      renderDeckSelect();
+      return;
+    }
+    closeModal();
+    savePref({ fieldSecond: st.second, botCount: st.count, botMode: st.mode, botPool: st.pool, fieldVs: false });
     if (opts.deck) d = opts.deck;
     const bot0 = { enabled: st.count !== 0, count: st.count, mode: st.mode, pool: st.pool };
     if (st.same && !opts.deck) restartSameHand({ second: st.second, bot: bot0 });
@@ -4311,6 +4680,12 @@
 
   /* ---------- Eventos ---------- */
   function bind() {
+    // VS: la ayuda de "Nuevo duelo" nombra Trampas conocidas (Mirror Force…): al cerrarse la ventana (por donde sea) se
+    // quitan sus filas VS, así no quedan en la página nombres de cartas que el rival podría tener
+    if (window.MutationObserver) {
+      new MutationObserver(() => { if ($('#modal').hidden) { const vr = $('#su-vsrows'); if (vr) vr.remove(); } })
+        .observe($('#modal'), { attributes: true, attributeFilter: ['hidden'] });
+    }
     $('#fd-deck').addEventListener('change', (e) => {
       const next = decks().find((x) => x.id === e.target.value);
       // Mientras no confirme, el selector sigue mostrando el mazo de la partida actual
@@ -4329,8 +4704,25 @@
     }));
     $('#fd-new').addEventListener('click', () => openSetup());
     $('#fd-end').addEventListener('click', () => endAttempt());
+    // Prueba / VS: la ventana "Nuevo duelo" con ese tipo elegido (nada cambia hasta Empezar)
+    $$('#fd-vmode [data-vmode]').forEach((b) => b.addEventListener('click', () => {
+      const vs = b.dataset.vmode === 'vs';
+      if (vs && !vsReady()) { toast(VS_OFF, 'bad'); return; }
+      openSetup({ vs });
+    }));
+    // VS: la barra (#fd-vs), tus LP y Rendirse los maneja js/vs.js
+    const onEl = (sel, fn) => { const el = $(sel); if (el) el.addEventListener('click', fn); };
+    onEl('#fd-vs', (e) => {
+      const b = e.target.closest('button');
+      if (b && !b.disabled && isVs()) vsCall('barClick', [b]);
+    });
+    onEl('#vs-mylp', () => { if (isVs()) vsCall('adjustLp', ['me']); });
+    onEl('#fd-concede', () => { if (isVs()) vsCall('concede'); });
     // Franja del rival: ver su mano, sus cartas, intentos y la ventana de Nuevo duelo
     $('#fd-opp').addEventListener('click', (e) => {
+      // VS: sus LP (Ajustar LP del rival) y "Cambiar…" (otro mazo para el rival)
+      const vb = e.target.closest('[data-vsopp]');
+      if (vb) { if (isVs()) vsCall('oppClick', [vb]); return; }
       const b = e.target.closest('[data-opp], [data-oppcard], [data-oppfield]');
       if (!b) return;
       if (b.dataset.oppcard) { showCard(Number(b.dataset.oppcard)); return; }
@@ -4399,7 +4791,11 @@
       else { chainFolded = !chainFolded; renderChain(); }
     }));
 
+    // VS: una celda del rival ([data-ozone], su asiento) va antes que tus zonas: atacarla, ver su pila, su carta…
+    const ozone = (e) => { const o = e.target.closest('[data-ozone]'); return o && isVs() ? o : null; };
     $('#board').addEventListener('click', (e) => {
+      const oz = ozone(e);
+      if (oz) { vsCall('clickRival', [oz.dataset.ozone]); return; }
       const zone = e.target.closest('[data-zone]');
       if (!zone) return;
       // En pilas, un clic sobre la carta superior abre la pila (o roba, en el mazo)
@@ -4407,6 +4803,8 @@
     });
     $('#board').addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
+      const oz = ozone(e);
+      if (oz) { e.preventDefault(); vsCall('clickRival', [oz.dataset.ozone]); return; }
       const zone = e.target.closest('[data-zone]');
       if (zone) { e.preventDefault(); onZone(zone.dataset.zone); }
     });
@@ -4465,10 +4863,23 @@
   }
 
   /* ---------- API ---------- */
+  /** VS recordado (prefs.fieldVs): el duelo que empieza al entrar al campo sin duelo. Sin su mazo rival, la ventana
+   * "Nuevo duelo" (con VS elegido) sobre un duelo de Prueba. → true si lo resolvió (empezó VS o abrió la ventana). */
+  function enterVs() {
+    const p = freshPrefs();
+    if (!p.fieldVs || !vsReady()) return false;
+    const rival = decks().find((x) => x && p.vsRivalDeckId != null && String(x.id) === String(p.vsRivalDeckId));
+    if (rival && arr(rival.main).length >= 5) {
+      newDuel(null, null, { vs: { rival, firstPref: p.vsFirst, pace: p.vsPace, askOnly: p.vsAskOnly !== false, responds: p.vsResponds !== false } });
+      if (isVs()) return true;
+    } else newDuel();
+    openSetup({ vs: true });
+    return true;
+  }
   function enter() {
     if (!d || !decks().includes(d)) {
       d = window.YGO.builder.current();
-      newDuel();
+      if (!enterVs()) newDuel();
     } else render();
     renderDeckSelect();
     // Una ventana del modo Automático que quedó esperando al cambiar de pantalla: cuenta como cerrada sin respuesta
@@ -4479,7 +4890,8 @@
 
   /** Empieza un duelo con una mano concreta (desde la prueba de mano).
    * opts: { second (la 6ª carta de la mano cuenta como robada), bot: { enabled, count, mode, pool, seed, forceHand } }.
-   * Sin opts.bot, el rival es el de las preferencias (ventana Nuevo duelo). */
+   * Sin opts.bot, el rival es el de las preferencias (ventana Nuevo duelo). Sin opts.vs siempre es Prueba; con opts.vs
+   * ({ rival: mazo o su id, firstPref, seed, pace, askOnly, responds, rivalHand, rivalOrder }) es un duelo VS. */
   function load(deckObj, handIds, restIds, opts) {
     d = deckObj;
     opts = Object.assign({ second: false }, opts);
@@ -4500,5 +4912,40 @@
   // state(): copia del estado actual (solo lectura; la usan las pruebas de tools/test_field.js)
   // testOps(ops, by): aplica ops del rival como si vinieran de un efecto suyo, con foto para "Deshacer" (solo para las pruebas)
   const testOps = (ops, by) => { if (!S) return; snapshot(); applyOppOps(arr(ops), { handtrap: by || 'Rival' }); render(); };
-  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps };
+
+  /* ---------- Modo VS: lo que usa js/vs.js (YGO.field.port) ----------
+   * Cada función lee el S de ahora (nunca una copia guardada). */
+  /** Descarta cartas de tu mano al Cementerio sin foto ni una línea por carta (límite de mano en VS); by: 'por el límite
+   * de mano' o quién lo hace. → cuántas se descartaron */
+  function discardMine(uids, by) {
+    const names = [];
+    arr(uids).forEach((u) => {
+      const f = find(u);
+      if (!f || f.loc.area !== 'hand') return;
+      if (moveNow(u, 'gy', { noSnap: true, quiet: true })) names.push(q(f.c.name));
+    });
+    const why = !by ? '' : /^(por |\()/.test(String(by)) ? ' ' + by : ' (por ' + byText(by) + ')';
+    if (names.length) pushLog({ kind: 'vs', text: 'Descartas ' + listEs(names) + why });
+    render();
+    return names.length;
+  }
+  const port = {
+    S: () => S, deck: () => d, decks, prefs: () => freshPrefs(), savePref,
+    render, toast, openDialog, closeModal, chooser, showCard, pickCards,
+    modalOpen: () => !$('#modal').hidden, busy: () => !!(pending || autoBusy),
+    pushLog: (entry, v) => pushLog(entry, v ? verdict(v) : null),
+    quiet: (fn) => { quiet++; try { return fn(); } finally { quiet--; } },
+    snapshot, lockUndo, canUndo, hasPlays, confirmRestart,
+    find, cardOf, nameById, placeName, phaseName, effectsOf,
+    canActivate: (uid, idx) => checkActivation({ uid, effectIndex: idx }).ok,
+    leaveField, // → 'gy' | 'extra' | 'ban' | 'gone' | 'opp'
+    discard: discardMine,
+    applyOps: (ops, by) => applyOppOps(arr(ops), { handtrap: by || 'Rival' }),
+    resolveChain: () => resolveChain(), botEvent,
+    draw: (n) => draw(n), // en la Fase de Robo no avisa "añadir" al rival
+    setPhase: (k, o) => setPhase(k, o), passTurn: (o) => passTurn(o),
+    newDuel: (h, r, o) => newDuel(h, r, o), openSetup,
+    select: (uid) => { selected = uid; render(); }, oppField: openOppField,
+  };
+  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port };
 })();

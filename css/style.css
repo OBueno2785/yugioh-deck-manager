@@ -881,3 +881,120 @@ button.chip-x:hover:not(:disabled) { background: rgba(227, 89, 78, .2); color: #
   .auto-seg button { padding: 5px 9px; }
   .ax-pick { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
 }
+
+/* ---------- Modo VS ----------
+   Duelo completo contra la computadora: selector Prueba / VS, tablero de 5 filas con el campo del rival arriba (sus zonas
+   se ven desde tu asiento; lo boca abajo, solo el dorso), franja del rival (LP, mano oculta, Mazo, Extra), barra del VS
+   (#fd-vs, fija arriba en el móvil), chips de LP, monstruos que pueden atacar y objetivos, registro de batalla y fin del duelo.
+   Todo cuelga de .fieldmode.vs, .board.vs, .oz, .fd-vs, .vs-lp, #fd-vmode o #fd-concede: el modo Prueba no cambia. */
+#fd-vmode { flex: none; }
+#fd-vmode button { padding: 6px 12px; font-weight: 600; }
+#fd-vmode button[data-vmode="vs"][aria-pressed="true"] { color: #ffd3ce; box-shadow: inset 0 -2px 0 var(--danger); }
+.fieldmode.vs #fd-order, .fieldmode.vs .toolrow .lp, .fieldmode.vs #fd-end { display: none !important; }
+button#fd-concede { border-color: var(--opp-line); color: #ffc2bb; }
+button#fd-concede:hover:not(:disabled) { border-color: var(--danger); background: rgba(227, 89, 78, .14); }
+
+/* Tablero: filas A–B del rival (celdas .oz con data-ozone), fila C compartida (su destierro a la izquierda), D–E tuyas */
+.board.vs { grid-template-rows: repeat(5, auto); }
+.zone-slot.oz { border-color: var(--opp-line); }
+.zone-slot.oz:not(:has(.slot-card)) { background: var(--opp-bg); }
+.zone-slot.oz:hover { border-color: var(--opp); }
+.zone-slot.oz .zl { color: rgba(255, 138, 125, .62); }
+.zone-slot.oz .pile-count { color: #ffd3ce; }
+/* Boca abajo en DEF: el dorso de lado (rotación de .slot-card.is-def), con su sombra */
+.oz .slot-card.is-def .card.back, .opp-taken .slot-card.is-def .card.back { box-shadow: 0 1px 4px rgba(0, 0, 0, .6); }
+/* Su monstruo en la Zona Extra compartida es una carta de verdad: no se apaga */
+.board.vs .zone-slot.opp-taken { border-style: solid; }
+.board.vs .zone-slot.opp-taken .slot-card { opacity: 1; }
+
+/* Batalla: tus monstruos que pueden atacar (verde); objetivos de tu ataque y el monstruo del rival que ataca (rojo) */
+.zone-slot.can-attack { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(76, 197, 140, .45); }
+.zone-slot.oz.can-attack, .zone-slot.opp-taken.can-attack { border-color: var(--danger); box-shadow: 0 0 0 2px rgba(227, 89, 78, .55); }
+.zone-slot.oz.target, .zone-slot.opp-taken.target {
+  border: 2px solid var(--danger); background: rgba(227, 89, 78, .18); animation: vs-pulse 1.1s ease-in-out infinite;
+}
+@keyframes vs-pulse { 50% { box-shadow: 0 0 0 4px rgba(227, 89, 78, .25); } }
+
+/* Franja del rival en VS: nombre de su mazo, LP, mano oculta (dorsos + número), Mazo, Extra y "Cambiar…" */
+.fd-opp.vs { gap: 4px 10px; }
+.vs-deckname { min-width: 0; max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 13.5px var(--data); letter-spacing: .02em; color: #ffc2bb; }
+.fd-opp.vs .opp-hand { flex-wrap: nowrap; }
+.opp-more { font: 600 12px var(--data); color: var(--muted); }
+.vs-count { display: inline-flex; align-items: baseline; gap: 2px; }
+.vs-count b { font: 700 14px var(--data); font-variant-numeric: tabular-nums; }
+.fd-opp.vs [data-vsopp="setup"] { margin-left: auto; }
+
+/* LP: el del rival en la franja, el tuyo en la cabecera de la mano; rojo al bajar y verde al subir (600 ms) */
+button.vs-lp {
+  padding: 1px 10px; border-radius: 999px; font: 700 15px/20px var(--data); letter-spacing: .03em; font-variant-numeric: tabular-nums;
+  color: var(--accent); border-color: rgba(226, 178, 74, .55); background: rgba(226, 178, 74, .08); transition: background .2s, color .2s, border-color .2s;
+}
+.fd-opp button.vs-lp { color: #ffd3ce; border-color: var(--opp-line); background: var(--opp-bg); }
+button.vs-lp.vs-hit, .fd-opp button.vs-lp.vs-hit { background: var(--danger); border-color: var(--danger); color: #fff; animation: vs-hit .6s ease-out; }
+button.vs-lp.vs-gain, .fd-opp button.vs-lp.vs-gain { background: var(--ok); border-color: var(--ok); color: #05261a; }
+@keyframes vs-hit { 20% { transform: translateX(-3px); } 40% { transform: translateX(3px); } 60% { transform: translateX(-2px); } }
+#vs-mylp { margin-left: auto; align-self: center; }
+
+/* Barra del VS: qué pasa ahora (turno del rival, ventana para responder, tu ataque, fin) y sus botones */
+.fd-vs { position: relative; z-index: 6; background: var(--bg); border-bottom: 1px solid var(--line); }
+.vs-in {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 7px 16px 7px 13px;
+  border-left: 3px solid var(--accent); background: linear-gradient(90deg, rgba(226, 178, 74, .1), transparent 75%);
+}
+.vs-in.rival, .fd-vs.rival .vs-in { border-left-color: var(--danger); background: linear-gradient(90deg, rgba(227, 89, 78, .16), transparent 75%); }
+.vs-in.battle, .fd-vs.battle .vs-in { border-left-color: var(--warn); background: linear-gradient(90deg, rgba(240, 163, 58, .14), transparent 75%); }
+.vs-in.end, .fd-vs.end .vs-in { border-left-color: var(--muted); background: linear-gradient(90deg, rgba(141, 157, 187, .12), transparent 75%); }
+#vs-msg { flex: 1 1 280px; min-width: 0; margin: 0; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.vs-in.rival #vs-msg { color: #ffd3ce; }
+.vs-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.vs-btns button { padding: 5px 12px; }
+.vs-tag { padding: 0 6px; border-radius: 3px; border: 1px solid var(--warn); color: var(--warn); font: 700 11px/17px var(--data); letter-spacing: .06em; text-transform: uppercase; }
+.vs-sub { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+
+/* Registro: batalla y avisos del duelo */
+.log-e.k-battle { border-left-color: var(--warn); color: #ffe2b8; }
+.log-e.k-vs { border-left-color: var(--accent); font-weight: 600; }
+
+/* Nuevo duelo (VS): historial y "Qué hace el rival"; ventana del final; lista de su Cementerio / destierro */
+#su-record { margin: 0; font-size: 13px; }
+.su-help { font-size: 13px; color: var(--muted); }
+.su-help summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.su-help-list { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; line-height: 1.4; }
+.vs-end { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--raised); }
+.vs-end.win { border-color: var(--ok); }
+.vs-end.lose { border-color: var(--danger); }
+.vs-end-why { font-size: 15px; font-weight: 600; }
+.vs-end.win .vs-end-why { color: #aef0cf; }
+.vs-end.lose .vs-end-why { color: #ffb3ab; }
+.vs-end-score { font: 600 14.5px var(--data); color: var(--muted); font-variant-numeric: tabular-nums; }
+.vs-end-rec { font-size: 13.5px; }
+.vs-pile .slot-card { position: relative; }
+
+/* Escritorio: todo el tablero y el comienzo de la mano caben sin desplazarse (celdas ≥ 60 px a 1440×900) */
+@media (min-width: 900px) {
+  .fieldmode.vs .board { width: min(100%, 780px, max(470px, calc((100dvh - var(--vs-chrome, 560px)) * 1.4 + 78px))); }
+  .fieldmode.vs .fd-hand .slot-card { width: 72px; }
+  /* Celdas más chicas que en Prueba: la etiqueta de la zona no se corta a mitad de palabra */
+  .board.vs .zl { overflow-wrap: normal; word-break: normal; hyphens: auto; letter-spacing: .02em; font-size: clamp(8px, .72vw, 10px); padding: 2px; }
+  /* Como en el móvil: en la pila se ve el número (el nombre queda en aria-label y en la ventana de la pila) */
+  .board.vs .pile .pile-count .pile-name { display: none; }
+}
+/* Móvil: la barra queda fija arriba de .fd-main (sus botones siempre a mano) */
+@media (max-width: 899px) {
+  .fd-vs { position: sticky; top: 0; z-index: 8; box-shadow: 0 4px 12px rgba(0, 0, 0, .35); }
+}
+@media (max-width: 599px) {
+  .fd-opp.vs { padding: 4px 12px; gap: 2px 8px; }
+  .fd-opp.vs button.opp-btn { padding: 2px 8px; min-height: 32px; }
+  .fd-opp.vs .opp-lock { font-size: 11.5px; line-height: 16px; }
+  .vs-deckname { max-width: 9.5em; font-size: 12.5px; }
+  button.vs-lp { padding: 1px 8px; font-size: 14px; line-height: 19px; min-height: 32px; } /* (fáciles de tocar) */
+  .fd-opp.vs .opp-backs i { width: 10px; height: 15px; }
+  .vs-in { padding: 6px 12px 6px 9px; gap: 6px 8px; }
+  #vs-msg { flex-basis: 100%; font-size: 13px; }
+  .vs-btns { width: 100%; }
+  .vs-btns button { flex: 1 1 auto; min-height: 38px; padding: 6px 8px; white-space: normal; line-height: 1.2; }
+  #fd-vmode button { padding: 6px 10px; }
+  /* Con "Rendirse" los cuatro botones del turno van en dos filas (como "Terminar intento" en Prueba): "Registro (N)" no se corta */
+  .fieldmode.vs .turn-btns { display: grid; grid-template-columns: 1fr 1fr; }
+}
