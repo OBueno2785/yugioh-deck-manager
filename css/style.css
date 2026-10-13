@@ -1034,3 +1034,30 @@ button.vs-lp.vs-gain, .fd-opp button.vs-lp.vs-gain { background: var(--ok); bord
   /* Con "Rendirse" los cuatro botones del turno van en dos filas (como "Terminar intento" en Prueba): "Registro (N)" no se corta */
   .fieldmode.vs .turn-btns { display: grid; grid-template-columns: 1fr 1fr; }
 }
+
+/* ---------- Como en Dueling Nexus (2026-10-13) ----------
+   Panel con pestañas Carta / Registro (Card Info / Event Log), reloj del turno, Reiniciar y el campo del rival en Prueba. */
+.fd-tabs { display: flex; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 3; background: var(--panel); }
+.fd-tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 9px 8px; font-weight: 600; }
+.fd-tabs button:hover:not(:disabled) { background: var(--raised); color: var(--fg); }
+.fd-tabs button[aria-selected="true"] { color: var(--fg); background: var(--raised); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab-n { font: 600 12.5px var(--data); color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (min-width: 900px) {
+  .fd-side.tab-log .fd-actions, .fd-side.tab-log .fd-detail { display: none; }
+  .fd-side.tab-card .fd-log { display: none; }
+  .fd-side.tab-log .fd-log { border-bottom: 0; }
+  .fd-side.tab-log .fd-log .log-scroll { max-height: calc(100dvh - 240px); }
+}
+@media (max-width: 899px) { .fd-tabs { display: none; } }
+.turn-clock { margin-left: 6px; font: 600 14px var(--data); color: var(--muted); font-variant-numeric: tabular-nums; }
+.turn-clock::before { content: "⏱ "; }
+.fieldmode.vs #fd-reset { display: none; }
+/* Campo del rival en Prueba: mismas filas que en VS, de solo mirar (sus cartas se tocan para quitarlas del campo) */
+.board.mirror { grid-template-rows: repeat(5, auto); }
+.zone-slot.pz:not([data-oppfield]):not(.pile) { cursor: default; }
+@media (min-width: 900px) {
+  .fieldmode.mirror .board { width: min(100%, 780px, max(470px, calc((100dvh - var(--vs-chrome, 560px)) * 1.4 + 78px))); }
+  .fieldmode.mirror .fd-hand .slot-card { width: 72px; }
+  .board.mirror .zl { overflow-wrap: normal; word-break: normal; hyphens: auto; letter-spacing: .02em; font-size: clamp(8px, .72vw, 10px); padding: 2px; }
+  .board.mirror .pile .pile-count .pile-name { display: none; }
+}

@@ -175,11 +175,12 @@
         <label class="lp"><span>LP</span><input id="fd-lp" type="number" step="100" inputmode="numeric"></label>
       </div>
       <div id="fd-turn" class="fd-turn" role="group" aria-label="Turno y fase">
-        <p class="turn-info"><b id="fd-turn-n">Turno 1</b> · <span id="fd-turn-who" class="turn-who">Tu turno</span></p>
+        <p class="turn-info"><b id="fd-turn-n">Turno 1</b> · <span id="fd-turn-who" class="turn-who">Tu turno</span> <span id="fd-clock" class="turn-clock" title="Tiempo de este turno">0:00</span></p>
         <div id="fd-phases" class="phases" role="group" aria-label="Fase"></div>
         <div class="turn-btns">
           <button id="fd-next-phase" type="button">Siguiente fase</button>
           <button id="fd-pass" type="button">Pasar turno</button>
+          <button id="fd-reset" type="button" title="Vuelve al principio con la misma mano (y las mismas handtraps del rival)">Reiniciar</button>
           <button id="fd-concede" type="button" hidden>Rendirse</button>
           <button id="fd-end" type="button" class="end-btn" title="Guarda el intento y muestra el resumen" hidden>Terminar intento</button>
           <button id="fd-log-btn" type="button" class="log-btn">Registro (0)</button>
@@ -206,6 +207,9 @@
     <aside id="fd-side" class="panel fd-side">
       <button id="fd-deselect" class="icon-btn fd-close" type="button" aria-label="Cerrar">×</button>
       <section id="fd-chain" class="fd-chain" aria-label="Cadena"></section>
+      <div id="fd-tabs" class="fd-tabs" role="tablist" aria-label="Panel">
+        <button type="button" role="tab" data-tab="card" aria-selected="true">Carta</button><button type="button" role="tab" data-tab="log" aria-selected="false">Registro <span id="fd-tab-log-n" class="tab-n">0</span></button>
+      </div>
       <div id="fd-actions" class="fd-actions"></div>
       <section id="fd-log" class="fd-log" aria-label="Registro"></section>
       <div id="fd-detail" class="fd-detail"></div>

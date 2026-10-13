@@ -64,6 +64,11 @@
   let oppQueued = null;   // respuesta del rival que se muestra al volver a la pestaña del campo
   let revealed = {};      // "Ver mano" del rival, por duelo (S.duelId)
   let recorded = null;    // { duelId, id }: intento ya guardado de este duelo (si se termina otra vez, se actualiza)
+  // Panel lateral como en Dueling Nexus: pestañas Carta / Registro, ficha de la carta al pasar el mouse y reloj del turno
+  let sideTab = (store.prefs().fieldTab === 'log') ? 'log' : 'card';
+  let lastSel = null;     // la carta elegida la última vez que se dibujó el panel (al elegir otra, se abre la pestaña Carta)
+  let hover = null;       // { uid } o { id }: la carta que se ve en la ficha sin estar elegida (la última bajo el mouse)
+  let clock = { key: '', t0: 0 }; // reloj del turno actual (no está en S: deshacer no lo toca)
   // Modo Automático (ver "Modo Automático" más abajo)
   let autoBusy = null;    // { i }: un eslabón automático se está haciendo (espera una respuesta tuya)
   let autoGen = 0;        // sube al deshacer o empezar otro duelo: lo que estaba esperando una respuesta ya no sigue
@@ -353,6 +358,7 @@
     history = [];
     histBase = 0;
     selected = null;
+    hover = null;
     pending = null;
     logSeen = 0;
     oppQueued = null;
@@ -3391,6 +3397,70 @@
       + '<span class="pile-count"><span class="pile-name">' + PILE_NAMES[p] + ' · </span>' + list.length + '</span></div>';
   }
 
+  /* ---------- Campo del rival en Prueba (como en Dueling Nexus) ----------
+   * El rival con handtraps no tiene zonas: sus cartas en el campo (S.opp.field) se acomodan de su izquierda a su derecha
+   * (monstruos en sus Zonas de Monstruo, Mágicas/Trampas en sus Zonas de M/T). Las celdas llevan data-pz (no data-zone:
+   * no son tuyas) y, si hay carta, data-oppfield: tocarla abre lo mismo que su ficha en la franja. */
+  const RIVAL_A = ['deck', 'st4', 'st3', 'st2', 'st1', 'st0', 'extra'];
+  const RIVAL_B = ['gy', 'mz4', 'mz3', 'mz2', 'mz1', 'mz0', 'fz'];
+  function rivalPlaced() {
+    const out = {};
+    let m = 0, st = 0;
+    arr(S.opp && S.opp.field).filter(Boolean).forEach((x) => {
+      const c = cardOf(x);
+      if (!c) return;
+      const mon = x.token || db.isMonster(c);
+      const z = mon ? (m < 5 ? 'mz' + m++ : null) : (st < 5 ? 'st' + st++ : null);
+      if (z) out[z] = x;
+    });
+    return out;
+  }
+  function rivalCellHtml(z, x) {
+    const label = /^mz/.test(z) ? 'Monstruo' : /^st/.test(z) ? 'M/T' : 'Zona de Campo';
+    const cls = 'zone-slot oz pz z-' + z.replace(/\d/, '');
+    if (!x) return '<div class="' + cls + '" data-pz="' + z + '" aria-label="Rival · ' + label + ': vacía"><span class="zl">' + label + '</span></div>';
+    const c = cardOf(x);
+    const tile = x.token ? tokenTile(c) : view.tile(c);
+    const what = q(c.name) + (x.def ? ' en DEF' : '') + (x.onChain ? ' · en la cadena' : '') + (x.owner === 'player' ? ' · es tu carta' : '');
+    return '<div class="' + cls + '" data-pz="' + z + '" data-oppfield="' + esc(x.uid) + '" tabindex="0" aria-label="' + esc('Rival · ' + label + ': ' + what) + '">'
+      + '<div class="slot-card' + (x.def && !x.onChain ? ' is-def' : '') + '">' + tile + '</div>'
+      + (x.owner === 'player' ? '<span class="own-badge mine" title="Es tu carta: vuelve a ti cuando deja el campo">Tuya</span>' : '')
+      + (x.onChain ? '<span class="cl-badge">Cadena</span>' : '') + '</div>';
+  }
+  function rivalPileHtml(p) {
+    const list = arr(S.opp && S.opp[p]).filter(Boolean);
+    const shown = list.filter((x) => !x.blank && x.id);
+    let top = '';
+    if (p === 'deck') top = list.length ? '<div class="slot-card"><div class="card back"></div></div>' : '';
+    else if (shown.length) top = '<div class="slot-card">' + view.tile(db.get(shown[shown.length - 1].id) || {}) + '</div>';
+    else if (list.length) top = '<div class="slot-card"><div class="card back"></div></div>';
+    return '<div class="zone-slot pile oz pz z-' + p + '" data-pz="' + p + '" tabindex="0" aria-label="Rival · ' + PILE_NAMES[p] + ': ' + list.length + '">'
+      + top + '<span class="pile-count"><span class="pile-name">' + PILE_NAMES[p] + ' · </span>' + list.length + '</span></div>';
+  }
+  function rivalRowsHtml() {
+    const placed = rivalPlaced();
+    const cell = (k) => (['deck', 'extra', 'gy'].includes(k) ? rivalPileHtml(k) : k === 'fz' ? rivalCellHtml('fz', null) : rivalCellHtml(k, placed[k]));
+    return RIVAL_A.map(cell).join('') + RIVAL_B.map(cell).join('');
+  }
+  /** Toque en una celda del rival (Prueba): su carta (como en la franja), su Cementerio o destierro, o cuántas tiene en el Mazo. */
+  function onRivalCell(el) {
+    const uid = el.dataset.oppfield;
+    if (uid) {
+      const x = arr(S.opp && S.opp.field).find((y) => y && y.uid === uid);
+      if (x && x.onChain) showCard(x.id); else openOppField(uid);
+      return;
+    }
+    const p = el.dataset.pz;
+    if (p === 'gy' || p === 'ban') {
+      const list = arr(S.opp && S.opp[p]).filter(Boolean).slice().reverse();
+      const known = list.filter((x) => !x.blank && x.id && db.get(x.id));
+      openDialog(PILE_NAMES[p] + ' del rival (' + list.length + ')', !list.length ? '<p class="hint">No hay cartas aquí.</p>'
+        : '<div class="pile-grid">' + known.map((x) => '<div class="slot-card">' + view.tile(db.get(x.id)) + '</div>').join('') + '</div>'
+          + (list.length > known.length ? '<p class="hint">' + (list.length - known.length) + ' carta(s) más que no son handtraps.</p>' : ''),
+        [{ label: 'Cerrar', kind: 'primary' }]);
+    } else if (p === 'deck') toast('Mazo del rival: ' + arr(S.opp && S.opp.deck).length + ' cartas', 'ok');
+  }
+
   /** Zonas candidatas, destino elegido y zonas apuntadas por Links, para dibujar el tablero. */
   function boardCtx() {
     const ctx = { cands: new Set(), dest: new Set(), linked: linkedZones() };
@@ -3427,7 +3497,13 @@
     // VS: arriba sus dos filas (Mazo/M/T/Extra y Cementerio/Monstruos/Campo) y su destierro en la primera celda de la fila del medio
     const ui = vs ? vsUi() : null;
     if (vs) ctx.ui = ui;
-    $('#board').innerHTML = (vs ? viewCall('rows', [S, ui], '') + viewCall('cell', [S, 'ban', ui], '<div class="cell spacer"></div>') : '<div class="cell spacer"></div>')
+    // Prueba con el rival de handtraps: su campo arriba, como en Dueling Nexus (sus monstruos, su Cementerio, su Mazo)
+    const mir = !vs && oppOn();
+    $('#board').classList.toggle('mirror', mir);
+    const fmode = $('.fieldmode');
+    if (fmode) fmode.classList.toggle('mirror', mir);
+    $('#board').innerHTML = (vs ? viewCall('rows', [S, ui], '') + viewCall('cell', [S, 'ban', ui], '<div class="cell spacer"></div>')
+      : mir ? rivalRowsHtml() + rivalPileHtml('ban') : '<div class="cell spacer"></div>')
       + '<div class="cell spacer"></div>' + zoneHtml('emz0', 'Zona de Monstruo Extra', ctx)
       + '<div class="cell spacer"></div>' + zoneHtml('emz1', 'Zona de Monstruo Extra', ctx) + '<div class="cell spacer"></div>' + pileHtml('ban')
       + zoneHtml('fz', 'Zona de Campo', ctx) + MZ.map((z) => zoneHtml(z, 'Monstruo', ctx)).join('') + pileHtml('gy')
@@ -3479,6 +3555,7 @@
     $('#fd-turn').classList.toggle('rival', !t.mine);
     $('#fd-turn-n').textContent = 'Turno ' + t.turn;
     $('#fd-turn-who').textContent = t.mine ? 'Tu turno' : 'Turno rival';
+    tickClock();
     $('#fd-phases').innerHTML = phases().map(([k, label]) => '<button type="button" data-phase="' + esc(k) + '" aria-pressed="' + (k === t.phase) + '">'
       + '<span class="ph-l">' + esc(label) + '</span><span class="ph-s">' + esc(PHASE_SHORT[k] || label) + '</span></button>').join('');
     // VS, turno del rival: la Invocación Normal del rival (sus contadores, YGO.duel.tsOf)
@@ -3729,18 +3806,59 @@
     box.scrollTop = box.scrollHeight;
   }
 
+  /** Reloj del turno (como el de Dueling Nexus): empieza al cambiar de duelo o de turno; deshacer dentro del turno no lo toca. */
+  const mmss = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+  function tickClock() {
+    const el = $('#fd-clock');
+    if (!el || !S) return;
+    const key = S.duelId + ':' + S.turnState.turn;
+    if (clock.key !== key) clock = { key, t0: Date.now() };
+    el.textContent = mmss(Date.now() - clock.t0);
+  }
+  setInterval(() => { if (document.body.dataset.mode === 'campo' && !document.hidden) tickClock(); }, 1000);
+
+  /** Pestañas del panel (escritorio): Carta (acciones y ficha) o Registro. Al elegir otra carta se abre Carta. */
+  function renderTabs() {
+    if (selected && selected !== lastSel) sideTab = 'card';
+    lastSel = selected;
+    const side = $('#fd-side');
+    side.classList.toggle('tab-card', sideTab === 'card');
+    side.classList.toggle('tab-log', sideTab === 'log');
+    $$('#fd-tabs [data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === sideTab)));
+    const n = $('#fd-tab-log-n');
+    if (n) n.textContent = S.log.length;
+  }
+  function setTab(t) {
+    sideTab = t === 'log' ? 'log' : 'card';
+    savePref({ fieldTab: sideTab });
+    renderTabs();
+    if (sideTab === 'log') { const sc = $('#fd-log .log-scroll'); if (sc) sc.scrollTop = sc.scrollHeight; }
+  }
+  /** La carta bajo el mouse (sin elegir ninguna): su ficha, como "Card Info" de Dueling Nexus. Solo cartas que están a la vista
+   * en la página (las del rival boca abajo no tienen código en el HTML). */
+  function hoverHtml() {
+    if (!hover) return '';
+    const f = hover.uid && find(hover.uid);
+    if (hover.uid && !f) { hover = null; return ''; }
+    const c = f ? f.c : db.get(hover.id);
+    if (!c) return '';
+    return '<p class="fd-where">Vista previa' + (f ? ' · ' + (f.loc.area === 'field' ? 'en el campo' : 'en ' + PILE_NAMES[f.loc.area].toLowerCase()) : '') + '</p>'
+      + (f && f.inst.token ? tokenDetail(c) : view.detail(c));
+  }
   function renderSide() {
     const side = $('#fd-side');
     const loc = selected && locate(selected);
+    renderTabs();
     if (!loc) {
       selected = null;
       document.body.classList.remove('fd-selected');
       $('#fd-actions').innerHTML = '';
       side._acts = [];
       const p = pending && pending.kind === 'summon' && find(pending.uid);
-      $('#fd-detail').innerHTML = p ? '<p class="fd-where">Invocando</p>' + view.detail(p.c)
+      const hv = !p && hoverHtml();
+      $('#fd-detail').innerHTML = p ? '<p class="fd-where">Invocando</p>' + view.detail(p.c) : hv ? hv
         : '<div class="detail-empty"><div class="card-back" aria-hidden="true"></div>'
-        + '<p>Toca una carta para ver qué puedes hacer con ella. Toca una zona libre para colocarla, o arrástrala.</p>'
+        + '<p>Toca una carta para ver qué puedes hacer con ella. Toca una zona libre para colocarla, o arrástrala. Pasa el mouse sobre una carta para ver su texto.</p>'
         + '<p class="kbd-hint">Atajos: <kbd>D</kbd> robar · <kbd>N</kbd> siguiente fase · <kbd>C</kbd> resolver cadena · <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshacer</p></div>';
       return;
     }
@@ -4730,6 +4848,29 @@
       });
     }));
     $('#fd-new').addEventListener('click', () => openSetup());
+    // Reiniciar (como "Reset" en Dueling Nexus): el mismo duelo desde el principio, con la misma mano y las mismas handtraps
+    $('#fd-reset').addEventListener('click', () => {
+      if (!S || isVs()) return;
+      confirmRestart(() => {
+        restartSameHand({ second: !!(S.start && S.start.second), keepBot: true });
+        toast('De nuevo con la misma mano' + (oppOn() ? ' y las mismas handtraps del rival' : ''), 'ok');
+      });
+    });
+    $$('#fd-tabs [data-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+    // Ficha de la carta al pasar el mouse (escritorio, sin una carta elegida)
+    const canHover = window.matchMedia ? window.matchMedia('(hover: hover) and (pointer: fine)') : { matches: false };
+    $('.fieldmode').addEventListener('mouseover', (e) => {
+      if (!canHover.matches || !S || selected || (pending && pending.kind === 'summon')) return;
+      if (e.target.closest('#fd-side')) return;
+      const el = e.target.closest('.card[data-id]');
+      if (!el) return;
+      const holder = el.closest('[data-uid]') || (el.matches('[data-uid]') ? el : null);
+      const uid = (el.dataset.uid || (holder && holder.dataset.uid)) || null;
+      const next = uid && find(uid) ? { uid } : db.get(Number(el.dataset.id)) ? { id: Number(el.dataset.id) } : null;
+      if (!next || (hover && hover.uid === next.uid && hover.id === next.id)) return;
+      hover = next;
+      renderSide();
+    });
     $('#fd-end').addEventListener('click', () => endAttempt());
     // Prueba / VS: la ventana "Nuevo duelo" con ese tipo elegido (nada cambia hasta Empezar)
     $$('#fd-vmode [data-vmode]').forEach((b) => b.addEventListener('click', () => {
@@ -4824,6 +4965,8 @@
     $('#board').addEventListener('click', (e) => {
       const oz = ozone(e);
       if (oz) { vsCall('clickRival', [oz.dataset.ozone]); return; }
+      const pz = e.target.closest('[data-pz]');
+      if (pz) { if (!isVs()) onRivalCell(pz); return; }
       const zone = e.target.closest('[data-zone]');
       if (!zone) return;
       // En pilas, un clic sobre la carta superior abre la pila (o roba, en el mazo)
@@ -4833,6 +4976,8 @@
       if (e.key !== 'Enter' && e.key !== ' ') return;
       const oz = ozone(e);
       if (oz) { e.preventDefault(); vsCall('clickRival', [oz.dataset.ozone]); return; }
+      const pz = e.target.closest('[data-pz]');
+      if (pz) { e.preventDefault(); if (!isVs()) onRivalCell(pz); return; }
       const zone = e.target.closest('[data-zone]');
       if (zone) { e.preventDefault(); onZone(zone.dataset.zone); }
     });
