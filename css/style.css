@@ -338,6 +338,38 @@ button.go:hover:not(:disabled) { background: rgba(226, 178, 74, .12); border-col
 .stepper { white-space: nowrap; }
 .stepper b { display: inline-block; min-width: 1.6em; text-align: center; font: 700 16px var(--data); }
 .stepper button { width: 26px; height: 26px; padding: 0; border-radius: 50%; line-height: 1; }
+/* Roles de carta (prueba de mano) */
+:root { --r-starter: var(--accent); --r-extender: #5cc8dc; --r-handtrap: #b590f2; --r-brick: var(--danger); }
+.r-starter { --rc: var(--r-starter); } .r-extender { --rc: var(--r-extender); } .r-handtrap { --rc: var(--r-handtrap); } .r-brick { --rc: var(--r-brick); }
+.role-badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 4px; border-radius: 999px; font: 700 12px/1 var(--data);
+  background: var(--rc, var(--raised)); color: #0a1120; vertical-align: 1px; }
+.ht-card .role-badge { position: absolute; right: 7%; bottom: 5%; z-index: 1; min-width: 22px; height: 22px; box-shadow: 0 2px 6px rgba(0, 0, 0, .5); pointer-events: none; }
+.role-pick { width: 108px; padding: 4px 6px; font: 600 13px var(--data); color: var(--muted); background: transparent; border-color: transparent; cursor: pointer; }
+.role-pick:hover { border-color: var(--line); }
+.role-pick[class*="r-"] { color: var(--rc); border-color: color-mix(in srgb, var(--rc) 45%, transparent); background: color-mix(in srgb, var(--rc) 10%, transparent); }
+.role-pick option { color: var(--fg); background: var(--panel); }
+.ht-list-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+button.small { padding: 3px 9px; font-size: 12.5px; }
+.log-copy-btn { margin-left: auto; }
+.log-copy { width: 100%; font: 13px/1.4 var(--body); }
+.kbd-hint { display: inline-block; color: var(--muted); }
+@media (hover: none) { .kbd-hint { display: none; } }
+.hand-line { font: 500 15px var(--data); color: var(--muted); }
+.roles-line .role-badge { margin-right: 2px; }
+.ht-odds-wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: flex-start; }
+.ht-odds-main { display: flex; flex-direction: column; gap: 8px; flex: 1 1 300px; min-width: 0; }
+.ht-odds { flex: 1 1 320px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.ht-odds th, .ht-odds td { padding: 5px 8px; border-bottom: 1px solid rgba(36, 54, 90, .6); text-align: left; }
+.ht-odds thead th { font: 600 11px var(--data); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.ht-odds tbody th { font: 500 14px var(--body); color: var(--fg); }
+.ht-odds .num { text-align: right; font: 600 16px var(--data); position: relative; white-space: nowrap; min-width: 84px; }
+.ht-odds thead .num { font: 600 11px var(--data); }
+.ht-odds .num.cur { color: var(--accent); }
+.ht-odds thead .num.cur { box-shadow: inset 0 -2px 0 var(--accent); }
+.ht-odds tr.neg th { color: var(--muted); }
+.ht-odds tr.neg .num.cur { color: var(--warn); }
+.ht-odds .bar { position: absolute; left: 8px; right: 8px; width: auto; border-radius: 0; bottom: 2px; height: 2px; background: linear-gradient(90deg, var(--accent) var(--p), transparent var(--p)); opacity: .55; }
+.ht-odds .bar.neg { background: linear-gradient(90deg, var(--warn) var(--p), transparent var(--p)); }
 .star { background: none; border: 0; color: var(--line); font-size: 18px; padding: 2px 4px; }
 .star:hover:not(:disabled) { background: none; color: var(--muted); }
 .star.on, .star.on:hover:not(:disabled) { color: var(--accent); }
@@ -410,6 +442,10 @@ button.go:hover:not(:disabled) { background: rgba(226, 178, 74, .12); border-col
   .ht-table th, .ht-table th.num { letter-spacing: 0; font-size: 10px; white-space: normal; }
   .ht-table .num { font-size: 14px; }
   .ht-name { font-size: 13px; }
+  .role-pick { width: 78px; padding: 4px 2px; font-size: 12px; }
+  .ht-odds th, .ht-odds td { padding: 5px 4px; }
+  .ht-odds tbody th { font-size: 13px; }
+  .ht-odds .num { min-width: 64px; font-size: 15px; }
   .stepper button { width: 24px; height: 24px; }
   .bar { display: none; }
 }

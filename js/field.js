@@ -3688,15 +3688,41 @@
   }
   function renderLog() {
     const box = $('#fd-log');
-    box.innerHTML = '<header class="chain-head"><h3>Registro</h3><span class="count">' + S.log.length + '</span></header><div class="log-scroll">' + logHtml() + '</div>';
+    box.innerHTML = '<header class="chain-head"><h3>Registro</h3><span class="count">' + S.log.length + '</span>'
+      + (S.log.length ? '<button type="button" class="small log-copy-btn" data-copy-log title="Copia las jugadas como texto para compartir la ruta">Copiar combo</button>' : '')
+      + '</header><div class="log-scroll">' + logHtml() + '</div>';
     if (S.log.length !== logSeen) {
       const sc = $('.log-scroll', box);
       sc.scrollTop = sc.scrollHeight;
       logSeen = S.log.length;
     }
   }
+  /** El registro como texto plano, numerado por turno, para compartir la ruta del combo. */
+  function logText() {
+    const lines = [(d ? d.name + ' · ' : '') + 'Simulador Yugioh'];
+    let turn = null, i = 0;
+    S.log.forEach((e) => {
+      if (e.turn !== turn) {
+        turn = e.turn; i = 0;
+        lines.push('', 'Turno ' + e.turn + ' · ' + (e.mine === false ? 'Turno rival' : 'Tu turno'));
+      }
+      lines.push(++i + '. ' + e.text + (e.illegal ? ' [ilegal]' : ''));
+    });
+    return lines.join('\n') + '\n';
+  }
+  function copyLog() {
+    if (!S.log.length) { toast('Todavía no hay jugadas para copiar'); return; }
+    const text = logText();
+    const fallback = () => {
+      openDialog('Copiar combo', '<p class="hint">Selecciona el texto y cópialo con Ctrl+C.</p><textarea class="log-copy" rows="12" readonly spellcheck="false">'
+        + esc(text) + '</textarea>', [{ label: 'Cerrar', kind: 'primary' }]);
+      const ta = $('#modal-body textarea'); ta.focus(); ta.select();
+    };
+    try { navigator.clipboard.writeText(text).then(() => toast('Combo copiado: ' + S.log.length + ' jugadas', 'ok'), fallback); } catch (e) { fallback(); }
+  }
   function openLog() {
-    openDialog('Registro del duelo', '<div class="log-modal">' + logHtml() + '</div>', [{ label: 'Cerrar', kind: 'primary' }]);
+    openDialog('Registro del duelo', '<div class="log-modal">' + logHtml() + '</div>',
+      [{ label: 'Copiar combo', keep: true, action: copyLog }, { label: 'Cerrar', kind: 'primary' }]);
     const b = $('#modal-body');
     b.scrollTop = b.scrollHeight;
     const box = $('#modal .modal-box');
@@ -3714,7 +3740,8 @@
       const p = pending && pending.kind === 'summon' && find(pending.uid);
       $('#fd-detail').innerHTML = p ? '<p class="fd-where">Invocando</p>' + view.detail(p.c)
         : '<div class="detail-empty"><div class="card-back" aria-hidden="true"></div>'
-        + '<p>Toca una carta para ver qué puedes hacer con ella. Toca una zona libre para colocarla, o arrástrala.</p></div>';
+        + '<p>Toca una carta para ver qué puedes hacer con ella. Toca una zona libre para colocarla, o arrástrala.</p>'
+        + '<p class="kbd-hint">Atajos: <kbd>D</kbd> robar · <kbd>N</kbd> siguiente fase · <kbd>C</kbd> resolver cadena · <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshacer</p></div>';
       return;
     }
     document.body.classList.add('fd-selected');
@@ -4755,6 +4782,7 @@
     $('#fd-next-phase').addEventListener('click', nextPhase);
     $('#fd-pass').addEventListener('click', passTurn);
     $('#fd-log-btn').addEventListener('click', openLog);
+    $('#fd-log').addEventListener('click', (e) => { if (e.target.closest('[data-copy-log]')) copyLog(); });
     bindAutoSwitch();
     $('#fd-strict').addEventListener('change', (e) => {
       prefs.fieldStrict = e.target.checked;
@@ -4857,7 +4885,10 @@
       }
       if (!$('#modal').hidden) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
+      else if (e.ctrlKey || e.metaKey || e.altKey) return;
       else if (e.key === 'd' || e.key === 'D') draw(1);
+      else if ((e.key === 'n' || e.key === 'N') && !$('#fd-next-phase').disabled) $('#fd-next-phase').click();
+      else if (e.key === 'c' || e.key === 'C') { const rb = $('#fd-chain [data-chain="resolve"]'); if (rb && !rb.disabled) rb.click(); }
     });
     bindDrag();
   }

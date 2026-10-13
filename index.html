@@ -50,7 +50,7 @@
           <button id="btn-sort" type="button">Ordenar</button>
           <button id="btn-clear" type="button">Vaciar</button>
           <button id="btn-import" type="button">Importar</button>
-          <button id="btn-export" type="button" class="primary">Exportar .ydk</button>
+          <button id="btn-export" type="button" class="primary">Exportar</button>
         </div>
       </div>
       <div class="deckstatus">
@@ -142,12 +142,14 @@
     </section>
     <aside class="panel ht-list">
       <header class="ht-list-head">
-        <h3>Mazo principal · <span id="ht-deck-n">0</span></h3>
-        <p class="hint">Usa <b>+</b> y <b>−</b> para elegir exactamente qué cartas tienes en mano. Marca con ★ tus starters.</p>
+        <div class="ht-list-title"><h3>Mazo principal · <span id="ht-deck-n">0</span></h3>
+          <button id="ht-mark-ht" type="button" class="small" title="Marca como Handtrap las handtraps conocidas que todavía no tienen rol">Marcar handtraps</button></div>
+        <p class="hint">Usa <b>+</b> y <b>−</b> para elegir exactamente qué cartas tienes en mano. En <b>Rol</b> marca tus starters (★), extenders, handtraps y ladrillos.
+          <span class="kbd-hint">Atajos: <kbd>R</kbd> robar mano · <kbd>1</kbd> robar 1.</span></p>
       </header>
       <div class="ht-table-wrap">
         <table class="ht-table">
-          <thead><tr><th>Carta</th><th class="num">Copias</th><th class="num">Abrirla</th><th class="num">Próx. robo</th><th>En mano</th><th><span class="sr">Starter</span>★</th></tr></thead>
+          <thead><tr><th>Carta</th><th class="num">Copias</th><th class="num">Abrirla</th><th class="num">Próx. robo</th><th>En mano</th><th>Rol</th></tr></thead>
           <tbody id="ht-rows"></tbody>
         </table>
       </div>

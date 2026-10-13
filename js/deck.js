@@ -120,6 +120,44 @@
       return ['#created by Simulador Yugioh', '#main', ...d.main, '#extra', ...d.extra, '!side', ...d.side].join('\n') + '\n';
     },
 
+    /** Enlace ydke:// (EDOPro, YGO Omega, YGOPRODeck): cada sección en base64 de códigos de 32 bits little-endian. */
+    toYdke(d) {
+      const enc = (ids) => {
+        let bin = '';
+        for (const id of ids) { const n = Number(id) >>> 0; bin += String.fromCharCode(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255); }
+        return btoa(bin);
+      };
+      return 'ydke://' + enc(d.main) + '!' + enc(d.extra) + '!' + enc(d.side) + '!';
+    },
+
+    /** Lee un enlace ydke:// (null si el texto no tiene uno). Mismo resultado que fromYdk. */
+    fromYdke(text) {
+      const m = String(text).match(/ydke:\/\/([A-Za-z0-9+/=]*)!([A-Za-z0-9+/=]*)!([A-Za-z0-9+/=]*)!?/);
+      if (!m) return null;
+      const out = { main: [], extra: [], side: [], unknown: 0, unknownIds: [] };
+      ['main', 'extra', 'side'].forEach((section, i) => {
+        let bin = '';
+        try { bin = atob(m[i + 1]); } catch (e) { return; }
+        for (let j = 0; j + 3 < bin.length; j += 4) {
+          const n = (bin.charCodeAt(j) | (bin.charCodeAt(j + 1) << 8) | (bin.charCodeAt(j + 2) << 16) | (bin.charCodeAt(j + 3) << 24)) >>> 0;
+          const c = db.get(n);
+          if (c) out[section].push(c.id);
+          else { out.unknown++; out.unknownIds.push(n); }
+        }
+      });
+      return out;
+    },
+
+    /** Lista de texto "3x Nombre" por secciones (la que lee parseList; como la de Dueling Nexus). */
+    toList(d) {
+      const block = (title, ids) => {
+        const m = new Map();
+        for (const id of ids) { const c = db.get(id); if (c) m.set(c.name, (m.get(c.name) || 0) + 1); }
+        return m.size ? [title + ':'].concat(Array.from(m, ([name, n]) => n + 'x ' + name)).join('\n') : '';
+      };
+      return [block('Main Deck', d.main), block('Extra Deck', d.extra), block('Side Deck', d.side)].filter(Boolean).join('\n\n') + '\n';
+    },
+
     /** Lee un .ydk. Devuelve { main, extra, side, unknown, unknownIds } con códigos base. */
     fromYdk(text) {
       const out = { main: [], extra: [], side: [], unknown: 0, unknownIds: [] };
@@ -169,8 +207,10 @@
       return missing;
     },
 
-    /** Lee un mazo en .ydk o en lista de texto. Devuelve { main, extra, side, unknown, unknownIds, missing }. */
+    /** Lee un mazo en .ydk, enlace ydke:// o lista de texto. Devuelve { main, extra, side, unknown, unknownIds, missing }. */
     fromText(text) {
+      const ydke = deck.fromYdke(text);
+      if (ydke) return Object.assign(ydke, { missing: [] });
       const entries = deck.parseList(text);
       if (!entries) return Object.assign(deck.fromYdk(text), { missing: [] });
       const out = { main: [], extra: [], side: [], unknown: 0, unknownIds: [] };

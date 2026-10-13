@@ -235,34 +235,55 @@
   }
 
   /* ---------- Importar / exportar ---------- */
+  const EXPORTS = {
+    ydk: { label: '.ydk', hint: 'Archivo .ydk, compatible con Dueling Nexus, EDOPro y YGO Omega.', text: (d) => deck.toYdk(d), ext: '.ydk' },
+    ydke: { label: 'ydke://', hint: 'Enlace ydke:// para pegar en EDOPro, YGO Omega o YGOPRODeck (y compartir por chat).', text: (d) => deck.toYdke(d), ext: '.txt' },
+    list: { label: 'Lista', hint: 'Lista de texto (3x Nombre), fácil de leer y compartir; también se puede importar aquí.', text: (d) => deck.toList(d), ext: '.txt' },
+  };
   function openExport() {
-    const text = deck.toYdk(current);
-    modal('Exportar ' + current.name, '<p class="hint">Formato .ydk, compatible con Dueling Nexus, EDOPro y YGO Omega. Cópialo o descárgalo.</p>'
-      + '<textarea id="m-ydk" rows="12" readonly spellcheck="false">' + esc(text) + '</textarea>', [
-      { label: 'Descargar .ydk', action: () => {
+    let fmt = EXPORTS[store.prefs().exportFmt] ? store.prefs().exportFmt : 'ydk';
+    const text = () => EXPORTS[fmt].text(current);
+    modal('Exportar ' + current.name, '<div class="seg" id="m-fmt" role="group" aria-label="Formato">'
+      + Object.keys(EXPORTS).map((k) => '<button type="button" data-fmt="' + k + '">' + EXPORTS[k].label + '</button>').join('') + '</div>'
+      + '<p class="hint" id="m-fmt-hint"></p>'
+      + '<textarea id="m-ydk" rows="12" readonly spellcheck="false"></textarea>', [
+      { label: 'Descargar', action: () => {
         try {
           const a = document.createElement('a');
-          a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
-          a.download = current.name.replace(/[\\/:*?"<>|]+/g, '_') + '.ydk';
+          a.href = URL.createObjectURL(new Blob([text()], { type: 'text/plain' }));
+          a.download = current.name.replace(/[\\/:*?"<>|]+/g, '_') + EXPORTS[fmt].ext;
           document.body.appendChild(a); a.click(); a.remove();
         } catch (e) { /* algunos visores bloquean descargas */ }
-        toast('Si no se descargó, usa Copiar y pégalo en un archivo .ydk');
+        toast('Si no se descargó, usa Copiar y pégalo en un archivo');
         return false;
       } },
       { label: 'Copiar', kind: 'primary', action: () => {
         const ta = $('#m-ydk');
         const fallback = () => { ta.focus(); ta.select(); toast('Texto seleccionado: cópialo con Ctrl+C'); };
         try {
-          navigator.clipboard.writeText(text).then(() => toast('Copiado al portapapeles', 'ok'), fallback);
+          navigator.clipboard.writeText(text()).then(() => toast('Copiado al portapapeles', 'ok'), fallback);
         } catch (e) { fallback(); }
         return false;
       } },
       { label: 'Cerrar' },
     ]);
+    const show = () => {
+      $$('#m-fmt button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.fmt === fmt)));
+      $('#m-fmt-hint').textContent = EXPORTS[fmt].hint;
+      $('#m-ydk').value = text();
+    };
+    $('#m-fmt').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-fmt]');
+      if (!b) return;
+      fmt = b.dataset.fmt;
+      store.savePrefs(Object.assign(store.prefs(), { exportFmt: fmt }));
+      show();
+    });
+    show();
   }
 
   function openImport() {
-    modal('Importar mazo', '<p class="hint">Acepta archivos .ydk y listas de texto como las que exporta Dueling Nexus (<i>3x Ash Blossom &amp; Joyous Spring</i>).</p>'
+    modal('Importar mazo', '<p class="hint">Acepta archivos .ydk, enlaces <i>ydke://</i> y listas de texto como las que exporta Dueling Nexus (<i>3x Ash Blossom &amp; Joyous Spring</i>).</p>'
       + '<label class="field"><span>Archivo .ydk o .txt</span><input id="m-file" type="file" accept=".ydk,.txt,text/plain"></label>'
       + '<label class="field"><span>O pega el contenido</span><textarea id="m-text" rows="9" spellcheck="false" placeholder="Main Deck:&#10;3x Ash Blossom &amp; Joyous Spring&#10;..."></textarea></label>'
       + '<label class="field"><span>Nombre</span><input id="m-name" type="text" maxlength="60" value="Mazo importado"></label>', [
@@ -272,7 +293,7 @@
         const name = $('#m-name').value.trim() || 'Mazo importado';
         const first = deck.fromText(text);
         if (!(first.main.length + first.extra.length + first.side.length + first.unknown)) {
-          toast('No encontré códigos de cartas en el texto', 'warn');
+          toast('No encontré cartas en el texto', 'warn');
           return false;
         }
         if (first.unknown && window.YGO.online.available()) {
