@@ -764,10 +764,10 @@
         endDuel({ winner: 'rival', why: 'deckout', turn: turnOf(s) });
         return;
       }
+      // Robas en tu Fase de Robo y el turno queda ahí (como en Dueling Nexus): tú pasas a la Standby y a la Principal 1
       p.quiet(() => {
+        S().turnState.phase = 'draw';
         p.draw(1);
-        S().turnState.phase = 'main1';
-        log('phase', 'Fase de Robo → Standby → Principal 1');
       });
       p.lockUndo();
       p.toast('Tu turno', 'ok');

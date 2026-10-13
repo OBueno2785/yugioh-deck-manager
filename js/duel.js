@@ -573,7 +573,8 @@
     S.opp = o;
     S.lp = LP0;
     if (!Array.isArray(S.chain)) S.chain = [];
-    S.turnState = RS.newTurnState({ phase: first === 'me' ? 'main1' : 'draw' });
+    // Como en Dueling Nexus, el turno empieza en la Fase de Robo (también el tuyo)
+    S.turnState = RS.newTurnState({ phase: 'draw' });
     S.turnState.turn = 1;
     S.turnState.mine = first === 'me';
     S.vs = {

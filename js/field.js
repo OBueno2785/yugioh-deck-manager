@@ -153,18 +153,45 @@
     const out = { ok: true, errors: list(v.errors), warnings: list(v.warnings) };
     if (v.ok === false && !out.errors.length) out.errors.push('Las reglas no permiten esta jugada.');
     out.ok = !out.errors.length;
-    return out;
+    if (v.toMain) { out.toMain = true; out.mainErrors = list(v.mainErrors); }
+    return toMainSoft(out);
   }
   /** Junta varios veredictos sin repetir mensajes. */
   function merge(...vs) {
     const out = { ok: true, errors: [], warnings: [] };
+    const main = [];
     vs.forEach((x) => {
       if (!x) return;
       const v = verdict(x);
+      if (v.toMain) v.mainErrors.forEach((m) => { if (!main.includes(m)) main.push(m); });
       v.errors.forEach((m) => { if (!out.errors.includes(m)) out.errors.push(m); });
       v.warnings.forEach((m) => { if (!out.warnings.includes(m)) out.warnings.push(m); });
     });
+    // Pasar sola a Principal 1 solo vale si eso es lo único que falta
+    if (main.length && out.errors.length) {
+      out.warnings = out.warnings.filter((m) => m !== TO_MAIN_NOTE);
+      main.forEach((m) => { if (!out.errors.includes(m)) out.errors.push(m); });
+    } else if (main.length) { out.toMain = true; out.mainErrors = main; }
     out.ok = !out.errors.length;
+    return out;
+  }
+  /* El turno empieza en la Fase de Robo (como en Dueling Nexus). En tu Fase de Robo o Standby, sin cadena, una jugada de la
+   * Fase Principal (Invocar, Colocar, una Mágica normal, un efecto de Ignición, cambiar posición) no es ilegal: si es lo único
+   * que le falta, el veredicto lo dice como aviso (toMain) y gate pasa a Principal 1 por la Standby antes de hacerla. */
+  const MAIN_ONLY = /tu Fase Principal\.$/;
+  const TO_MAIN_NOTE = 'Estás en la Fase de Robo o Standby: el campo pasa a Principal 1 para hacerla.';
+  function canAutoMain() {
+    const t = S && S.turnState;
+    if (!t || !t.mine || (t.phase !== 'draw' && t.phase !== 'standby') || (Array.isArray(S.chain) && S.chain.length)) return false;
+    return !(S.vs && (S.vs.over || (S.vs.win && S.vs.win.kind === 'mine-attack')));
+  }
+  function toMainSoft(out) {
+    if (out.ok || out.toMain || !out.errors.every((m) => MAIN_ONLY.test(m)) || !canAutoMain()) return out;
+    out.mainErrors = out.errors;
+    out.errors = [];
+    out.ok = true;
+    out.toMain = true;
+    if (!out.warnings.includes(TO_MAIN_NOTE)) out.warnings.unshift(TO_MAIN_NOTE);
     return out;
   }
 
@@ -243,10 +270,10 @@
   const phaseName = (k) => (phases().find((p) => p[0] === k) || [k, k])[1];
   const strict = () => prefs.fieldStrict !== false;
 
-  /** opts.second: vas segundo (turno 2, tu turno, con Fase de Batalla). */
+  /** opts.second: vas segundo (turno 2, tu turno, con Fase de Batalla). Como en Dueling Nexus, el turno empieza en la Fase de Robo. */
   function newTurnState(opts) {
     const second = !!(opts && opts.second);
-    const t = ask('newTurnState', second ? [{ second: true }] : [], () => ({ turn: 1, mine: true, phase: 'main1', normalSummons: 0, opt: {} }));
+    const t = ask('newTurnState', [{ second, phase: 'draw' }], () => ({ turn: 1, mine: true, phase: 'draw', normalSummons: 0, opt: {} }));
     // Si las reglas no conocen { second }, el turno 2 se pone aquí
     if (second && t && t.turn === 1) { t.turn = 2; t.mine = true; }
     return t;
@@ -412,7 +439,7 @@
     return true;
   }
 
-  /** Vas segundo: en la Fase de Robo robas 1 (si la mano ya trae 6 cartas, la 6ª cuenta como la robada). */
+  /** Vas segundo: en la Fase de Robo robas 1 (si la mano ya trae 6 cartas, la 6ª cuenta como la robada). El turno sigue en la Fase de Robo. */
   function secondDraw(given) {
     const t = S.turnState;
     t.phase = 'draw';
@@ -420,7 +447,6 @@
     if (given) card = S.hand[S.hand.length - 1];
     else if (S.deck.length) { card = S.deck.shift(); S.hand.push(card); }
     pushLog({ kind: 'draw', text: 'Vas segundo · Fase de Robo: robas ' + (card ? q(nameById(card.id)) : 'nada (el mazo está vacío)') });
-    t.phase = 'main1';
   }
   /** Mazo principal sin las cartas de la mano (con sus copias). */
   function restOf(handIds) {
@@ -867,13 +893,36 @@
   /* ---------- Juego: ventana de "jugada ilegal" ---------- */
   /** Hace la jugada si es legal. Si no: en modo estricto pregunta; si no, la hace y queda marcada en rojo. */
   function gate(v, perform, cancel) {
+    if (v.toMain && toMainFirst(v) === 'stop') { if (cancel) cancel(); return; }
     if (v.ok || !strict()) { perform(); return; }
     illegalDialog(v, perform, cancel);
+  }
+  /** Pasa a Principal 1 por la Standby (queda en el registro) antes de una jugada con toMain.
+   * → 'stop' si el rival respondió al cambio de fase (la jugada no se hace). */
+  function toMainFirst(v) {
+    v.toMain = false;
+    v.warnings = v.warnings.filter((m) => m !== TO_MAIN_NOTE);
+    if (!canAutoMain()) {
+      // (ya no estás en tu Fase de Robo o Standby sin cadena: vuelve a ser lo que decían las reglas)
+      if (S.turnState.phase !== 'main1' && S.turnState.phase !== 'main2') { v.errors = arr(v.mainErrors).slice(); v.ok = !v.errors.length; }
+      return false;
+    }
+    snapshot();
+    for (const key of S.turnState.phase === 'draw' ? ['standby', 'main1'] : ['main1']) {
+      run('setPhase', [S, key], () => { S.turnState.phase = key; });
+      ensureState();
+      pushLog({ kind: 'phase', text: 'Fase: ' + phaseName(key) });
+      botEvent({ type: 'phase', phase: key });
+      if (S.chain.length || S.turnState.phase !== key) { render(); return 'stop'; }
+    }
+    toast('Pasas a ' + phaseName('main1'), 'ok');
+    render();
+    return true;
   }
   function checksHtml(v, okText) {
     const items = v.errors.map((m) => '<li class="err">' + esc(m) + '</li>')
       .concat(v.warnings.map((m) => '<li class="warn">' + esc(m) + '</li>'));
-    if (!items.length && okText) items.push('<li class="ok">' + esc(okText) + '</li>');
+    if (okText && !v.errors.length && v.warnings.every((m) => m === TO_MAIN_NOTE)) items.unshift('<li class="ok">' + esc(okText) + '</li>');
     return items.length ? '<ul class="checks">' + items.join('') + '</ul>' : '';
   }
   /** cancel: si se cancela o se cierra la ventana sin elegir (lo usa el modo Automático). */
