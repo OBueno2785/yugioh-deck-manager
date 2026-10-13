@@ -153,45 +153,18 @@
     const out = { ok: true, errors: list(v.errors), warnings: list(v.warnings) };
     if (v.ok === false && !out.errors.length) out.errors.push('Las reglas no permiten esta jugada.');
     out.ok = !out.errors.length;
-    if (v.toMain) { out.toMain = true; out.mainErrors = list(v.mainErrors); }
-    return toMainSoft(out);
+    return out;
   }
   /** Junta varios veredictos sin repetir mensajes. */
   function merge(...vs) {
     const out = { ok: true, errors: [], warnings: [] };
-    const main = [];
     vs.forEach((x) => {
       if (!x) return;
       const v = verdict(x);
-      if (v.toMain) v.mainErrors.forEach((m) => { if (!main.includes(m)) main.push(m); });
       v.errors.forEach((m) => { if (!out.errors.includes(m)) out.errors.push(m); });
       v.warnings.forEach((m) => { if (!out.warnings.includes(m)) out.warnings.push(m); });
     });
-    // Pasar sola a Principal 1 solo vale si eso es lo único que falta
-    if (main.length && out.errors.length) {
-      out.warnings = out.warnings.filter((m) => m !== TO_MAIN_NOTE);
-      main.forEach((m) => { if (!out.errors.includes(m)) out.errors.push(m); });
-    } else if (main.length) { out.toMain = true; out.mainErrors = main; }
     out.ok = !out.errors.length;
-    return out;
-  }
-  /* El turno empieza en la Fase de Robo (como en Dueling Nexus). En tu Fase de Robo o Standby, sin cadena, una jugada de la
-   * Fase Principal (Invocar, Colocar, una Mágica normal, un efecto de Ignición, cambiar posición) no es ilegal: si es lo único
-   * que le falta, el veredicto lo dice como aviso (toMain) y gate pasa a Principal 1 por la Standby antes de hacerla. */
-  const MAIN_ONLY = /tu Fase Principal\.$/;
-  const TO_MAIN_NOTE = 'Estás en la Fase de Robo o Standby: el campo pasa a Principal 1 para hacerla.';
-  function canAutoMain() {
-    const t = S && S.turnState;
-    if (!t || !t.mine || (t.phase !== 'draw' && t.phase !== 'standby') || (Array.isArray(S.chain) && S.chain.length)) return false;
-    return !(S.vs && (S.vs.over || (S.vs.win && S.vs.win.kind === 'mine-attack')));
-  }
-  function toMainSoft(out) {
-    if (out.ok || out.toMain || !out.errors.every((m) => MAIN_ONLY.test(m)) || !canAutoMain()) return out;
-    out.mainErrors = out.errors;
-    out.errors = [];
-    out.ok = true;
-    out.toMain = true;
-    if (!out.warnings.includes(TO_MAIN_NOTE)) out.warnings.unshift(TO_MAIN_NOTE);
     return out;
   }
 
@@ -893,36 +866,13 @@
   /* ---------- Juego: ventana de "jugada ilegal" ---------- */
   /** Hace la jugada si es legal. Si no: en modo estricto pregunta; si no, la hace y queda marcada en rojo. */
   function gate(v, perform, cancel) {
-    if (v.toMain && toMainFirst(v) === 'stop') { if (cancel) cancel(); return; }
     if (v.ok || !strict()) { perform(); return; }
     illegalDialog(v, perform, cancel);
-  }
-  /** Pasa a Principal 1 por la Standby (queda en el registro) antes de una jugada con toMain.
-   * → 'stop' si el rival respondió al cambio de fase (la jugada no se hace). */
-  function toMainFirst(v) {
-    v.toMain = false;
-    v.warnings = v.warnings.filter((m) => m !== TO_MAIN_NOTE);
-    if (!canAutoMain()) {
-      // (ya no estás en tu Fase de Robo o Standby sin cadena: vuelve a ser lo que decían las reglas)
-      if (S.turnState.phase !== 'main1' && S.turnState.phase !== 'main2') { v.errors = arr(v.mainErrors).slice(); v.ok = !v.errors.length; }
-      return false;
-    }
-    snapshot();
-    for (const key of S.turnState.phase === 'draw' ? ['standby', 'main1'] : ['main1']) {
-      run('setPhase', [S, key], () => { S.turnState.phase = key; });
-      ensureState();
-      pushLog({ kind: 'phase', text: 'Fase: ' + phaseName(key) });
-      botEvent({ type: 'phase', phase: key });
-      if (S.chain.length || S.turnState.phase !== key) { render(); return 'stop'; }
-    }
-    toast('Pasas a ' + phaseName('main1'), 'ok');
-    render();
-    return true;
   }
   function checksHtml(v, okText) {
     const items = v.errors.map((m) => '<li class="err">' + esc(m) + '</li>')
       .concat(v.warnings.map((m) => '<li class="warn">' + esc(m) + '</li>'));
-    if (okText && !v.errors.length && v.warnings.every((m) => m === TO_MAIN_NOTE)) items.unshift('<li class="ok">' + esc(okText) + '</li>');
+    if (!items.length && okText) items.push('<li class="ok">' + esc(okText) + '</li>');
     return items.length ? '<ul class="checks">' + items.join('') + '</ul>' : '';
   }
   /** cancel: si se cancela o se cierra la ventana sin elegir (lo usa el modo Automático). */
