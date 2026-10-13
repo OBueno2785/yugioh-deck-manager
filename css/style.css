@@ -1061,3 +1061,92 @@ button.vs-lp.vs-gain, .fd-opp button.vs-lp.vs-gain { background: var(--ok); bord
   .board.mirror .zl { overflow-wrap: normal; word-break: normal; hyphens: auto; letter-spacing: .02em; font-size: clamp(8px, .72vw, 10px); padding: 2px; }
   .board.mirror .pile .pile-count .pile-name { display: none; }
 }
+
+/* ---------- Tamaño de Dueling Nexus (escritorio ≥ 1200 px) ----------
+   Como en duelingnexus.com/handtestmode (captura de 1919×867): ficha de la carta a la izquierda (25 % del ancho),
+   fases en columna a la izquierda del tablero y botones del turno a la derecha, zonas verticales de 77×106 que llenan el alto
+   y la mano del mismo tamaño que las zonas, debajo del tablero. --stage-h (alto libre para tablero + mano) lo pone field.js.
+   En tablet y móvil .turn-l, .turn-r y .fd-stage no son cajas: todo queda como antes. */
+.turn-l, .turn-r, .fd-stage { display: contents; }
+@media (min-width: 600px) and (max-width: 1199px) {
+  .fd-turn .ns-state, .fd-turn .switch, .fd-turn .auto-wrap { order: 1; }
+}
+@media (min-width: 1200px) {
+  .fieldmode {
+    --sidew: clamp(300px, 25vw, 480px);
+    --rows: 3; --rg: 6px; --pad: 10px; --rail: 150px;
+    /* Alto de zona: lo que deja el alto libre (filas + mano), como mucho el de Dueling Nexus (106 px a 867 de alto) */
+    --zh-fit: calc((var(--stage-h, calc(100dvh - 200px)) - var(--rows) * var(--rg) - 56px) / (var(--rows) + .962));
+    /* …y de ancho, lo que dejan el panel de la carta y las dos columnas del turno (128 + 150 px y sus márgenes) */
+    --zw: max(44px, min(calc(min(12.2dvh, var(--zh-fit)) * .73), calc((100vw - var(--sidew) - 360px) / 9.4)));
+    --zh: calc(var(--zw) / .73);
+    --cg: calc(var(--zw) * .4);
+    --bw: calc(var(--zw) * 9.4 + 2 * var(--pad) + 2px);
+    grid-template-columns: var(--sidew) minmax(0, 1fr);
+  }
+  .fieldmode.mirror, .fieldmode.vs { --rows: 5; }
+  .fieldmode > .fd-side { order: -1; }
+  .fd-detail .detail-empty { max-width: none; margin-top: 24px; }
+  .fd-detail .detail-empty p { max-width: 260px; }
+  .fd-detail .card-back { width: 52%; }
+
+  .fd-main {
+    display: grid; overflow: hidden auto;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-areas: "tool tool tool" "opp opp opp" "vs vs vs" "pend pend pend" "lrail stage rrail";
+  }
+  .fd-main > .toolrow { grid-area: tool; padding: 8px 12px; }
+  .fd-main > .toolrow .lp input { width: 80px; }
+  .fd-main > .toolrow .deck-select { max-width: clamp(170px, 14vw, 240px); }
+  .fd-main > .fd-opp { grid-area: opp; }
+  .fd-main > .fd-vs { grid-area: vs; }
+  .fd-main > .pending { grid-area: pend; }
+  .fd-turn { display: contents; }
+
+  /* Izquierda: turno, reloj y fases en columna (DP / SP / MP1 / BP / MP2 / EP) */
+  .turn-l {
+    grid-area: lrail; justify-self: end; align-self: center; width: 128px; margin-right: 16px;
+    display: flex; flex-direction: column; align-items: stretch; gap: 10px; text-align: center;
+  }
+  .turn-l .turn-info { font-size: 0; white-space: normal; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .turn-l .turn-info b { font-size: 15px; padding: 5px 0; width: 100%; border: 1px solid var(--line); border-radius: var(--r); background: var(--raised); }
+  .turn-l .turn-who { font-size: 14px; }
+  .turn-l .turn-clock { font-size: 14px; margin: 0; }
+  .turn-l .phases { display: flex; flex-direction: column; }
+  .turn-l .phases button { padding: 6px 4px; }
+  .turn-l .phases button + button { border-left: 0; border-top: 1px solid var(--line); }
+  .turn-l .ns-state { white-space: normal; font-size: 13px; line-height: 1.35; }
+
+  /* Derecha: los botones del turno en columna (como Chaining / Cancel / Reset) */
+  .turn-r {
+    grid-area: rrail; justify-self: start; align-self: center; width: var(--rail); margin-left: 16px;
+    display: flex; flex-direction: column; align-items: stretch; gap: 12px;
+  }
+  .turn-r .turn-btns { flex-direction: column; gap: 8px; }
+  .turn-r .turn-btns button { white-space: normal; line-height: 1.2; padding: 8px 10px; }
+  .fd-turn .turn-r .switch { margin-left: 0; font-size: 13px; line-height: 1.3; align-items: flex-start; }
+  .turn-r .auto-wrap { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .turn-r .auto-seg button { padding: 4px 8px; }
+
+  /* Centro: tablero y mano */
+  .fd-stage {
+    grid-area: stage; width: var(--bw); min-height: 0; padding: 4px 0;
+    display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 8px;
+  }
+  .fd-stage .board-wrap { padding: 0; }
+  .fieldmode .fd-stage .board {
+    width: var(--bw); grid-template-columns: repeat(7, var(--zw)); column-gap: var(--cg); row-gap: var(--rg); padding: var(--pad);
+  }
+  .fd-stage .zone-slot, .fd-stage .cell.spacer { aspect-ratio: auto; width: var(--zw); height: var(--zh); }
+  .fd-stage .zone-slot .slot-card { height: 94%; }
+  .fd-stage .zl { overflow-wrap: normal; word-break: normal; hyphens: auto; letter-spacing: .02em; font-size: clamp(8px, calc(var(--zw) * .12), 10.5px); padding: 2px; }
+  .fd-stage .pile .pile-count .pile-name { display: none; }
+  /* Mano: cartas de 70×103 como en Dueling Nexus (la carta que cabe en la zona), con "Mano N" a un costado */
+  .fd-stage .fd-hand-wrap { width: var(--bw); margin: 0; padding: 4px 8px; flex-direction: row; align-items: center; gap: 8px; }
+  .fd-stage .fd-hand-wrap header { flex: none; min-width: 44px; flex-direction: column; align-items: center; gap: 2px; }
+  .fd-stage .fd-hand-wrap header h3 { font-size: 13px; }
+  .fd-stage #vs-mylp { margin: 4px 0 0; padding: 1px 7px; font-size: 13.5px; }
+  .fd-stage .fd-hand { flex: 1; min-width: 0; min-height: calc(var(--zh) * .962 + 10px); padding: 5px 2px 5px; scrollbar-width: thin; }
+  .fieldmode .fd-stage .fd-hand .slot-card { width: calc(var(--zh) * .66); }
+}

@@ -1803,7 +1803,7 @@
       wrap.innerHTML = '<span class="auto-lbl" aria-hidden="true">Tus efectos:</span>';
       wrap.appendChild(box);
       const sw = $('#fd-strict') && $('#fd-strict').closest('label');
-      if (sw && sw.parentNode === $('#fd-turn')) sw.after(wrap); else $('#fd-turn').appendChild(wrap);
+      if (sw && $('#fd-turn').contains(sw)) sw.after(wrap); else $('#fd-turn').appendChild(wrap);
     }
     box.addEventListener('click', (e) => {
       const b = e.target.closest('[data-auto]');
@@ -4871,6 +4871,14 @@
       hover = next;
       renderSide();
     });
+    // Escritorio como en Dueling Nexus: las zonas y la mano toman su tamaño del alto que queda para el tablero (--stage-h en css)
+    const stage = $('.fd-stage');
+    if (stage && window.ResizeObserver) {
+      new ResizeObserver(() => {
+        const h = Math.round(stage.clientHeight);
+        if (h > 0) $('.fieldmode').style.setProperty('--stage-h', h + 'px');
+      }).observe(stage);
+    }
     $('#fd-end').addEventListener('click', () => endAttempt());
     // Prueba / VS: la ventana "Nuevo duelo" con ese tipo elegido (nada cambia hasta Empezar)
     $$('#fd-vmode [data-vmode]').forEach((b) => b.addEventListener('click', () => {

@@ -175,21 +175,25 @@
         <label class="lp"><span>LP</span><input id="fd-lp" type="number" step="100" inputmode="numeric"></label>
       </div>
       <div id="fd-turn" class="fd-turn" role="group" aria-label="Turno y fase">
-        <p class="turn-info"><b id="fd-turn-n">Turno 1</b> · <span id="fd-turn-who" class="turn-who">Tu turno</span> <span id="fd-clock" class="turn-clock" title="Tiempo de este turno">0:00</span></p>
-        <div id="fd-phases" class="phases" role="group" aria-label="Fase"></div>
-        <div class="turn-btns">
-          <button id="fd-next-phase" type="button">Siguiente fase</button>
-          <button id="fd-pass" type="button">Pasar turno</button>
-          <button id="fd-reset" type="button" title="Vuelve al principio con la misma mano (y las mismas handtraps del rival)">Reiniciar</button>
-          <button id="fd-concede" type="button" hidden>Rendirse</button>
-          <button id="fd-end" type="button" class="end-btn" title="Guarda el intento y muestra el resumen" hidden>Terminar intento</button>
-          <button id="fd-log-btn" type="button" class="log-btn">Registro (0)</button>
+        <div class="turn-l">
+          <p class="turn-info"><b id="fd-turn-n">Turno 1</b> · <span id="fd-turn-who" class="turn-who">Tu turno</span> <span id="fd-clock" class="turn-clock" title="Tiempo de este turno">0:00</span></p>
+          <div id="fd-phases" class="phases" role="group" aria-label="Fase"></div>
+          <p id="fd-ns" class="ns-state"></p>
         </div>
-        <p id="fd-ns" class="ns-state"></p>
-        <label class="switch"><input id="fd-strict" type="checkbox"><span>Bloquear jugadas ilegales</span></label>
-        <div class="auto-wrap"><span class="auto-lbl" aria-hidden="true">Tus efectos:</span><div id="fd-auto" class="seg auto-seg" role="group" aria-label="Tus efectos: manual o automático">
-          <button type="button" data-auto="off" aria-pressed="true" title="Declaras el efecto y lo haces tú en el campo">Manual</button><button type="button" data-auto="on" aria-pressed="false" title="Al declarar paga el costo y elige objetivos; al resolver hace lo que dice el efecto (lo que no entienda te lo pide a mano)">Automático</button>
-        </div></div>
+        <div class="turn-r">
+          <div class="turn-btns">
+            <button id="fd-next-phase" type="button">Siguiente fase</button>
+            <button id="fd-pass" type="button">Pasar turno</button>
+            <button id="fd-reset" type="button" title="Vuelve al principio con la misma mano (y las mismas handtraps del rival)">Reiniciar</button>
+            <button id="fd-concede" type="button" hidden>Rendirse</button>
+            <button id="fd-end" type="button" class="end-btn" title="Guarda el intento y muestra el resumen" hidden>Terminar intento</button>
+            <button id="fd-log-btn" type="button" class="log-btn">Registro (0)</button>
+          </div>
+          <label class="switch"><input id="fd-strict" type="checkbox"><span>Bloquear jugadas ilegales</span></label>
+          <div class="auto-wrap"><span class="auto-lbl" aria-hidden="true">Tus efectos:</span><div id="fd-auto" class="seg auto-seg" role="group" aria-label="Tus efectos: manual o automático">
+            <button type="button" data-auto="off" aria-pressed="true" title="Declaras el efecto y lo haces tú en el campo">Manual</button><button type="button" data-auto="on" aria-pressed="false" title="Al declarar paga el costo y elige objetivos; al resolver hace lo que dice el efecto (lo que no entienda te lo pide a mano)">Automático</button>
+          </div></div>
+        </div>
       </div>
       <div id="fd-opp" class="fd-opp" role="group" aria-label="Rival"></div>
       <div id="fd-vs" class="fd-vs" role="status" aria-live="polite" hidden></div>
@@ -197,11 +201,13 @@
         <div class="pending-main"><span id="fd-pending-text"></span><div id="fd-pick" class="pick-info" hidden></div></div>
         <div class="pending-btns"><button id="fd-confirm" type="button" class="primary" hidden>Confirmar</button><button id="fd-cancel" type="button">Cancelar</button></div>
       </div>
-      <div class="board-wrap"><div id="board" class="board"></div></div>
-      <div id="fd-chain-strip" class="chain-strip" aria-label="Cadena" hidden></div>
-      <div id="fd-hand-wrap" class="fd-hand-wrap">
-        <header><h3>Mano</h3><span class="count" id="fd-hand-count">0</span><button id="vs-mylp" type="button" class="vs-lp mine" aria-label="Tus LP" hidden></button></header>
-        <div id="fd-hand" class="fd-hand"></div>
+      <div class="fd-stage">
+        <div class="board-wrap"><div id="board" class="board"></div></div>
+        <div id="fd-chain-strip" class="chain-strip" aria-label="Cadena" hidden></div>
+        <div id="fd-hand-wrap" class="fd-hand-wrap">
+          <header><h3>Mano</h3><span class="count" id="fd-hand-count">0</span><button id="vs-mylp" type="button" class="vs-lp mine" aria-label="Tus LP" hidden></button></header>
+          <div id="fd-hand" class="fd-hand"></div>
+        </div>
       </div>
     </section>
     <aside id="fd-side" class="panel fd-side">
