@@ -1097,8 +1097,11 @@ button.vs-lp.vs-gain, .fd-opp button.vs-lp.vs-gain { background: var(--ok); bord
     grid-template-areas: "tool tool tool" "opp opp opp" "vs vs vs" "pend pend pend" "lrail stage rrail";
   }
   .fd-main > .toolrow { grid-area: tool; padding: 8px 12px; }
-  .fd-main > .toolrow .lp input { width: 80px; }
-  .fd-main > .toolrow .deck-select { max-width: clamp(170px, 14vw, 240px); }
+  /* (un poco más justos: con Prueba / VS / En línea la barra sigue en una línea a 1440) */
+  .fd-main > .toolrow { gap: 5px; }
+  .fd-main > .toolrow .lp input { width: 74px; }
+  .fd-main > .toolrow .deck-select { max-width: clamp(160px, 13vw, 240px); }
+  .fd-main > .toolrow > button, .fd-main > .toolrow .seg button { padding-left: 9px; padding-right: 9px; }
   .fd-main > .fd-opp { grid-area: opp; }
   .fd-main > .fd-vs { grid-area: vs; }
   .fd-main > .pending { grid-area: pend; }
@@ -1149,4 +1152,37 @@ button.vs-lp.vs-gain, .fd-opp button.vs-lp.vs-gain { background: var(--ok); bord
   .fd-stage #vs-mylp { margin: 4px 0 0; padding: 1px 7px; font-size: 13.5px; }
   .fd-stage .fd-hand { flex: 1; min-width: 0; min-height: calc(var(--zh) * .962 + 10px); padding: 5px 2px 5px; scrollbar-width: thin; }
   .fieldmode .fd-stage .fd-hand .slot-card { width: calc(var(--zh) * .66); }
+}
+
+/* ---------- En línea (js/pvp.js): la sala, tus cartas boca abajo y el chat ----------
+   Todo cuelga de .pvp-room, .down-badge, .log-e.k-chat o .fieldmode.pvp: Prueba y VS contra la computadora no cambian. */
+.modal-box:has(.pvp-room) { width: min(600px, 100%); }
+.pvp-room h3 { margin: 0; font: 700 15px var(--display); }
+.pvp-room input[type="text"] { width: 100%; }
+.pvp-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pvp-box { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #0c1526; }
+.pvp-box p { font-size: 13px; }
+.pvp-box button { align-self: flex-start; }
+.pvp-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.pvp-code-row > span { color: var(--muted); font-size: 13px; }
+.pvp-code { font: 700 26px/1.1 var(--data); letter-spacing: .18em; color: var(--accent); }
+.pvp-room p .pvp-code { font-size: 20px; }
+.pvp-link { font-size: 12.5px; overflow-wrap: anywhere; user-select: all; }
+.pvp-status { padding: 7px 10px; border-radius: var(--r); border: 1px solid var(--line); background: var(--raised); font-size: 13.5px; }
+.pvp-err { color: #ffb3ab; }
+@media (max-width: 560px) { .pvp-choices { grid-template-columns: 1fr; } }
+/* Tu carta boca abajo (en el campo o desterrada): tú la ves, el rival no */
+.down-badge {
+  position: absolute; top: 3px; right: 3px; z-index: 3; max-width: calc(100% - 6px); padding: 0 3px; border-radius: 3px; pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: clip;
+  background: rgba(10, 17, 32, .86); color: var(--muted); border: 1px solid var(--line); font: 700 8.5px/12px var(--data); letter-spacing: .02em; text-transform: uppercase;
+}
+@media (max-width: 599px) { .down-badge { top: 2px; right: 2px; max-width: calc(100% - 4px); padding: 0 2px; font-size: 7px; line-height: 10px; letter-spacing: 0; } }
+.log-e.k-chat { border-left-color: var(--ok); color: #cfeedd; }
+/* El selector Prueba / VS / En línea más justo, para que la barra siga en una línea */
+.fieldmode #fd-vmode button { padding-left: 9px; padding-right: 9px; }
+/* En el teléfono, el selector de modo y el de mazo comparten la primera fila (como antes de «En línea») */
+@media (max-width: 599px) {
+  .fieldmode #fd-vmode button { padding-left: 7px; padding-right: 7px; }
+  .fieldmode .toolrow #fd-deck { flex: 1 1 120px; min-width: 0; }
 }

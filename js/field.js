@@ -103,6 +103,10 @@
   const vsCall = (name, args, fallback) => modCall('vs', name, args, fallback);
   /** ¿El duelo actual es VS? */
   const isVs = () => !!(S && S.vs) && !!duelCall('isVs', [S], false);
+  /* En línea (js/net.js + js/pvp.js): un duelo VS contra otra persona. Usa todo lo del VS (S.vs, S.opp como espejo de lo
+   * público del rival), pero sin IA ni bot: lo que hace el rival llega por la red y lo aplica js/pvp.js. */
+  const pvpCall = (name, args, fallback) => modCall('pvp', name, args, fallback);
+  const isPvp = () => isVs() && !!S.vs.pvp && !!duelCall('isPvp', [S], false);
   /** ¿Están los cuatro módulos del VS? Si falta uno, el botón VS queda desactivado y todo es Prueba. */
   const vsReady = () => ['duel', 'ai', 'vsview', 'vs'].every((m) => !!window.YGO[m] && typeof window.YGO[m] === 'object');
   const VS_OFF = 'Modo VS no disponible';
@@ -346,10 +350,12 @@
   /** Duelo nuevo. handIds/restIds: mano y mazo exactos (si no, se reparte al azar).
    * opts: { second, bot: { enabled, count, mode, pool, seed, forceHand } }; sin opts.bot se usan las preferencias. */
   function newDuel(handIds, restIds, opts) {
+    opts = opts || {};
+    // Un duelo en línea en juego que se reemplaza por otro sin pasar por la sala: el rival se entera (gana él)
+    if (isPvp() && !(opts.vs && opts.vs.pvp)) pvpCall('abandon');
     // VS: lo que esperaba el duelo anterior (temporizadores del rival, ventanas) ya no sigue
     vsCall('reset');
     undoFloor = 0;
-    opts = opts || {};
     const second = opts.second !== undefined ? !!opts.second : !!freshPrefs().fieldSecond;
     // Una ventana del campo que quedó abierta (p. ej. "El rival responde" del duelo anterior) ya no vale
     if (dialogOpen || pileOpen) closeModal();
@@ -669,7 +675,7 @@
   /** Una carta del campo que se movió a mano: el rival solo lleva sus cuentas (p. ej. Ghost Mourner: ¿dejó el campo?),
    * sin responder (observe sin consider). */
   function movedNotice(loc, uid, dest) {
-    if (!oppOn() || !loc || loc.area !== 'field' || FIELD_ZONES.includes(dest)) return;
+    if (!oppOn() || isPvp() || !loc || loc.area !== 'field' || FIELD_ZONES.includes(dest)) return;
     const notes = arr(botCall('observe', [S, { type: 'move', uids: [uid], from: fromKey(loc), to: dest }], []));
     if (notes.length) { oppNotes(notes); render(); }
   }
@@ -766,7 +772,12 @@
           if (toGy(card) === 'ban') { const l = gyToBan(); where = 'Desterradas (en vez del Cementerio' + (l && l.source ? ', por ' + byText(l.source) : '') + ')'; lastWent = 'ban'; }
         } finally { quietGy = null; }
       }
-      else S.ban.push(resetCard(card));
+      else {
+        // Desterrada boca abajo: el rival no la ve (tú sí, en tu pila de desterradas)
+        const b = resetCard(card);
+        if (opts.faceDown) { b.faceDown = true; where = 'Desterradas (boca abajo)'; }
+        S.ban.push(b);
+      }
     } else {
       // Dentro del campo conserva cómo se invocó; si entra desde fuera, entra sin declarar
       if (loc.area !== 'field') resetCard(card);
@@ -806,6 +817,8 @@
     if (!by) snapshot();
     const cards = S.deck.splice(0, n);
     S.hand.push(...cards);
+    // En línea: lo robado no se nombra al rival (js/pvp.js lo cuenta como "roba N cartas")
+    if (isPvp()) pvpCall('drew', [cards.map((x) => x.uid)]);
     pushLog({ kind: 'draw', text: (by ? by + ': roba ' : 'Roba ') + cards.map((x) => q(nameById(x.id))).join(', ') });
     render();
     // Robar fuera de la Fase de Robo (por un efecto) es añadir a la mano: el rival lo ve (Droll & Lock Bird, Hecahands Godos)
@@ -1394,6 +1407,8 @@
   function activate(uid, fx, zoneHint) {
     const f = find(uid);
     if (!f) return;
+    // En línea: se activa cuando te toca (después de que el rival responda o pase; no mientras la cadena se resuelve)
+    if (isPvp()) { const why = pvpCall('chainBlock', [], ''); if (why) { toast(why); return; } }
     const { loc, inst, c } = f;
     const st = !db.isMonster(c);
     // Solo la activación de la carta la pone en el campo (un efecto de una Mágica en la mano, p. ej. "discard this card", no)
@@ -1572,6 +1587,8 @@
     if (autoBusy) { toast('Termina primero lo que te está pidiendo la cadena'); return; }
     if (!S.chain.length) return;
     cont = cont === true;
+    // En línea: solo resuelves cuando te toca (el rival pasó o te devolvió la cadena); js/pvp.js avisa por qué no
+    if (!cont && isPvp() && !pvpCall('mayResolve', [], true)) return;
     if (!cont) snapshot();
     let touched = false; // ya se resolvió algún eslabón en esta pasada (el automático necesita su propia foto)
     let autoAt = -1;
@@ -1582,6 +1599,8 @@
       const l = S.chain[i];
       if (l.done) continue;
       const opp = l.owner === 'opp';
+      // En línea: el eslabón del rival lo resuelve él en su navegador; aquí la cadena espera (js/pvp.js le pasa el turno)
+      if (opp && l.pvp) { stop = i; break; }
       // Ash y Belle solo niegan un eslabón de abajo: no importa el orden. Si tu respuesta lo niega, tampoco.
       // (Un eslabón de la IA del VS: ella dice si tu respuesta lo niega)
       if (opp && !l.negated && doing.length && !['Ash', 'Belle'].includes(shortName(l.handtrap || nameById(l.id)))
@@ -1622,6 +1641,13 @@
       if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
       if (touched || cont) snapshot(); // Deshacer = volver a antes de este eslabón
       runAutoLink(autoAt);
+      return;
+    }
+    if (stop >= 0 && S.chain[stop].pvp) {
+      // En línea: lo tuyo de arriba ya está; el eslabón de abajo es del rival (lo hace él cuando termines lo tuyo)
+      render();
+      if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
+      pvpCall('handOver', [{ stop, doing: doing.slice(), touched }]);
       return;
     }
     if (stop >= 0 && S.chain[stop].owner !== 'opp') {
@@ -1668,7 +1694,7 @@
     }
     const resolved = S.chain;
     // VS: las Mágicas/Trampas de la IA van a su Cementerio; tu Droll le cierra el Mazo; tu Veiler/Imperm niega a su monstruo
-    if (isVs()) vsLogs(aiCall('afterChain', [S, S.chain, {}], []));
+    if (isVs() && !isPvp()) vsLogs(aiCall('afterChain', [S, S.chain, {}], []));
     S.chain = [];
     render();
     if (negatedMine.length) toast(listEs(negatedMine) + (negatedMine.length > 1 ? ' quedaron negados' : ' quedó negado') + ': no hagas lo que dice su efecto', 'warn');
@@ -1681,6 +1707,8 @@
   function toggleNegated(i) {
     const l = S.chain[i];
     if (!l) return;
+    // En línea: el eslabón del rival lo marca su dueño (le llega como pedido); aquí se ve enseguida
+    if (l.pvp) { pvpCall('negateLink', [i]); return; }
     snapshot();
     const name = q(nameById(l.id));
     if (l.negated) {
@@ -1889,7 +1917,7 @@
       else if (area === 'mzone') tops(a.zone === 'center' ? ['mz2'] : [...EMZ, ...MZ]);
       else if (area === 'stzone') tops([...ST, 'fz']);
       else if (area === 'pzone') tops(['st0', 'st4']);
-      else if (area === 'oppField') arr(S.opp && S.opp.field).forEach((x) => { if (x && !x.blank && x.id) add(x, 'oppField', null, true); });
+      else if (area === 'oppField') arr(S.opp && S.opp.field).forEach((x) => { if (x && !x.blank && (x.id || (x.faceDown && S.opp.pvp))) add(x, 'oppField', null, true); });
     });
     return out;
   }
@@ -2157,7 +2185,7 @@
       if (a.verb === 'reveal') { parts.push('revela ' + qList(list)); return; }
       const host = a.verb === 'detach' ? nameOf(uid) : '';
       // "shuffle ... into the Deck" baraja; "place ... on the bottom of the Deck" va abajo
-      const move = a.verb === 'returnDeck' ? { shuffle: true } : a.verb === 'deckTop' ? { bottom: a.deckPos === 'bottom' } : {};
+      const move = a.verb === 'returnDeck' ? { shuffle: true } : a.verb === 'deckTop' ? { bottom: a.deckPos === 'bottom' } : a.verb === 'banish' && a.faceDown ? { faceDown: true } : {};
       const moved = moveCards(list, a, COST_DEST[a.verb], { move });
       if (!moved.length) return;
       parts.push(moveText(Object.assign({}, a, move), moved) + (host ? ' de ' + q(host) : ''));
@@ -2248,7 +2276,7 @@
       const nb = noBanish();
       if (nb) return { did: false, text: '', uids: [], blocked: noBanishText(nb) };
       const cards = S.deck.splice(0, n);
-      cards.forEach((x) => S.ban.push(resetCard(x)));
+      cards.forEach((x) => { const b = resetCard(x); if (a.faceDown) b.faceDown = true; S.ban.push(b); });
       return { did: true, uids: cards.map((x) => x.uid), text: 'destierra ' + (n === 1 ? 'la carta' : 'las ' + n + ' cartas') + ' de arriba del Mazo' + (a.faceDown ? ' (boca abajo)' : '') };
     }
     const cards = S.deck.splice(0, n);
@@ -2279,10 +2307,14 @@
       const card = q(nameById(l.id));
       if (left.length && S.chain.some((x, k) => k < i && !x.done)) {
         // Quedan eslabones abajo: pausa para que termines esto a mano antes de seguir
+        // (en línea, si el de abajo es del rival: «Listo» se lo pasa)
+        let below = null;
+        for (let k = i - 1; k >= 0 && !below; k--) if (!S.chain[k].done) below = S.chain[k];
+        const toRival = !!(below && below.pvp);
         pushLog({ kind: 'resolve', text: 'Pausa: haz a mano lo que falta de CL' + (i + 1) + ' (' + card + ')' });
         render();
         openDialog('Termina a mano CL' + (i + 1), '<p>Esto de ' + esc(card) + ' no se hace solo:</p><ul class="fx-left">' + left.map((t) => '<li>' + esc(t) + '</li>').join('') + '</ul>'
-          + '<p class="hint">Hazlo en el campo y después toca <b>Seguir resolviendo</b>.</p>', [{ label: 'Entendido', kind: 'primary' }]);
+          + '<p class="hint">Hazlo en el campo y después toca <b>' + (toRival ? 'Listo</b> (arriba): sigue el rival con su eslabón.' : 'Seguir resolviendo</b>.') + '</p>', [{ label: 'Entendido', kind: 'primary' }]);
         return;
       }
       if (left.length) {
@@ -2445,6 +2477,7 @@
     const blocked = (why) => { log('no se hace «' + a.text + '» · ' + why); toast(why, 'bad'); };
     const move = {};
     if (a.verb === 'returnDeck') move.shuffle = true;
+    if (a.verb === 'banish' && a.faceDown) move.faceDown = true; // "banish ... face-down"
     if (a.verb === 'deckTop') {
       let bottom = a.deckPos === 'bottom';
       if (a.deckPos === 'topOrBottom') {
@@ -2917,11 +2950,11 @@
       snapshot();
       if (!rv) vsDropAttack();
       // Eslabones del rival que quedan sin resolver: su carta deja la cadena sin hacer nada (no "te cortó")
-      if (oppOn() && S.chain.some((l) => l && l.owner === 'opp' && !l.done)) {
+      if (oppOn() && !isPvp() && S.chain.some((l) => l && l.owner === 'opp' && !l.done)) {
         oppNotes(botCall('observe', [S, { type: 'resolved', abandoned: true, chain: JSON.parse(JSON.stringify(S.chain)) }], []));
       }
       // VS: lo mismo para los eslabones de la IA (sus Mágicas/Trampas ya resueltas van a su Cementerio)
-      if (isVs() && S.chain.length) vsLogs(aiCall('afterChain', [S, S.chain, { abandoned: true }], []));
+      if (isVs() && !isPvp() && S.chain.length) vsLogs(aiCall('afterChain', [S, S.chain, { abandoned: true }], []));
       pushLog({ kind: 'phase', text: 'Termina el turno ' + S.turnState.turn }, v);
       run('passTurn', [S], () => localPassTurn(S));
       ensureState();
@@ -2967,7 +3000,10 @@
       return acts;
     }
 
-    if (!onField) {
+    // Boca abajo en el destierro: no se activa ni se invoca desde ahí (solo se mueve a mano)
+    if (!onField && loc.area === 'ban' && inst.faceDown) {
+      /* (sin acciones de efecto) */
+    } else if (!onField) {
       if (db.isMonster(c)) {
         const opts = summonOptions(uid);
         if (loc.area === 'gy' || loc.area === 'ban') add('Activar efecto…', fx, 'primary');
@@ -3000,11 +3036,15 @@
     if (isTop && !inst.faceDown) add('Colocar boca abajo', () => manualFlip(uid, true));
     if (isTop && inst.faceDown) add(isMonsterZone(loc.zone) ? 'Voltear (por un efecto)' : 'Voltear sin activar', () => manualFlip(uid, false));
     add('Mover a una zona…', () => startPending('move', uid));
+    // VS: colocar boca abajo de una vez (sin pasar por boca arriba: el rival no la ve) y mostrar una carta de la mano
+    if (isVs() && !onField) add('Colocar boca abajo en una zona…', () => startPending('move', uid, { down: true }));
+    if (isPvp() && loc.area === 'hand') add('Mostrar al rival', () => pvpCall('reveal', [[uid]]));
     if (db.isMonster(c) && !(onField && isTop && isMonsterZone(loc.zone))) add('Acoplar como material…', () => startPending('attach', uid));
     if (loc.area !== 'gy') add('Al cementerio', () => move(uid, 'gy'));
     // Un Péndulo cuya Invocación (Normal, Especial o por Péndulo) o activación como Escala fue negada sí va al cementerio
     if (pendulumToExtra(loc, c)) add('Al cementerio (invocación negada)', () => move(uid, 'gy', { negated: true }));
     if (loc.area !== 'ban') add('Desterrar', () => move(uid, 'ban'));
+    if (isVs() && loc.area !== 'ban') add('Desterrar boca abajo', () => move(uid, 'ban', { faceDown: true }));
     const pendMon = db.isMonster(c) && !!(c.type & T.PENDULUM);
     if (loc.area !== 'extra') {
       // Péndulo del Mazo Principal: solo boca arriba. De Fusión/Sincronía/Xyz: boca arriba (dejó el campo) o boca abajo (regresa)
@@ -3076,8 +3116,8 @@
     chooser('¿Qué material desacoplas?', nameById(host.id), stack.slice(1).map((m) => ({ label: nameById(m.id), action: () => doIt(m) })));
   }
 
-  function startPending(kind, uid) {
-    pending = { kind, uid };
+  function startPending(kind, uid, extra) {
+    pending = Object.assign({ kind, uid }, extra || {});
     selected = null; // la hoja de acciones se cierra: ahora se toca la zona
     closePile();
     render();
@@ -3175,11 +3215,12 @@
     }
     if (pending && pending.kind === 'summon') { pickZone(zone); return; }
     if (pending) {
-      const { kind, uid } = pending;
+      const { kind, uid, down } = pending;
       // Acoplar o poner encima: solo sobre un monstruo del campo; si no, se sigue esperando
       if (kind !== 'move' && !(FIELD_ZONES.includes(zone) && isMonsterZone(zone) && S.zones[zone].length)) { toast('Elige un monstruo en el campo'); return; }
       pending = null;
-      if (kind === 'move') move(uid, zone, defaultOpts(uid, zone));
+      // "Colocar boca abajo en una zona…": entra boca abajo (en una Zona de Monstruo, en DEF)
+      if (kind === 'move') move(uid, zone, down ? { faceDown: true, def: FIELD_ZONES.includes(zone) && isMonsterZone(zone) } : defaultOpts(uid, zone));
       else if (kind === 'overlay') move(uid, zone, { overlay: true });
       else move(uid, zone, { attach: true });
       render();
@@ -3222,7 +3263,8 @@
   /** Diálogo en la ventana compartida. buttons: [{ label, kind, action, keep }]; el botón cierra antes de actuar
    * (keep: no cierra; la acción decide). onDismiss: si se cierra sin tocar un botón (fuera de la ventana, Escape u otra
    * ventana encima); lo usa el modo Automático. */
-  function openDialog(title, bodyHtml, buttons, onDismiss) {
+  /** opts.keepFocus: quien llama deja el foco donde lo quiere (volver a dibujar la ventana sin robarle el foco a lo que escribes). */
+  function openDialog(title, bodyHtml, buttons, onDismiss, opts) {
     if (dismissFn && !$('#modal').hidden) fireDismiss();
     pileOpen = null;
     $('#modal-title').textContent = title;
@@ -3241,7 +3283,7 @@
     dialogOpen = true;
     dismissFn = typeof onDismiss === 'function' ? onDismiss : null;
     const first = $('.primary', foot) || foot.lastChild;
-    if (first) setTimeout(() => first.focus(), 30);
+    if (first && !(opts && opts.keepFocus)) setTimeout(() => first.focus(), 30);
   }
   function closeModal() {
     pileOpen = null;
@@ -3337,6 +3379,7 @@
     const cl = !inZone && chainTag(inst.uid);
     const hit = oppTargets(inst.uid);
     return '<div class="slot-card ' + cls + '">' + html + (inst.faceDown && !reveal ? '<span class="down-label">' + esc(c.name) + '</span>' : '')
+      + (inst.faceDown && reveal ? '<span class="down-badge" title="Boca abajo: el rival no la ve">Boca abajo</span>' : '')
       + (cl ? '<span class="cl-badge">' + cl + '</span>' : '')
       + (hit.length ? '<span class="opp-hit" title="Objetivo del rival: ' + esc(hit.join(', ')) + '">↯</span>' : '') + '</div>';
   }
@@ -3522,6 +3565,8 @@
     renderSide();
     renderPile();
     if (vs) vsCall('render');
+    // En línea: lo público de tu lado sale hacia el rival (js/pvp.js junta varios dibujos y manda solo si cambió)
+    if (vs && S.vs.pvp) pvpCall('afterRender');
   }
   /** Modo VS o Prueba: clases del tablero, el selector Prueba/VS, tus LP junto a la mano y la barra del VS. */
   function renderVsChrome(vs, ui) {
@@ -3529,12 +3574,16 @@
     const fm = $('.fieldmode');
     if (fm) fm.classList.toggle('vs', vs);
     const ready = vsReady();
+    const pvp = vs && !!S.vs.pvp;
     $$('#fd-vmode [data-vmode]').forEach((b) => {
-      b.setAttribute('aria-pressed', String((b.dataset.vmode === 'vs') === vs));
-      if (b.dataset.vmode !== 'vs') return;
-      b.disabled = !ready;
-      if (!ready) b.title = VS_OFF;
+      const k = b.dataset.vmode;
+      b.setAttribute('aria-pressed', String(k === 'pvp' ? pvp : k === 'vs' ? vs && !pvp : !vs));
+      if (k === 'prueba') return;
+      const ok = ready && (k !== 'pvp' || !!window.YGO.pvp);
+      b.disabled = !ok;
+      if (!ok) b.title = VS_OFF;
     });
+    $('.fieldmode').classList.toggle('pvp', pvp);
     const lp = $('#vs-mylp');
     if (lp) {
       lp.hidden = !vs;
@@ -3597,7 +3646,7 @@
     const f = find(pending.uid);
     if (!picking) {
       $('#fd-pending-text').textContent = {
-        move: 'Toca la zona a la que quieres mover ' + f.c.name,
+        move: pending.down ? 'Toca la zona en la que colocas boca abajo ' + f.c.name : 'Toca la zona a la que quieres mover ' + f.c.name,
         overlay: 'Toca el monstruo que será material de ' + f.c.name,
         attach: 'Toca el monstruo al que se acopla ' + f.c.name,
       }[pending.kind];
@@ -3734,7 +3783,14 @@
         + '<button type="button" class="cl-negbtn" data-neg="' + i + '" aria-pressed="' + !!neg + '" title="'
         + (neg ? 'Quitar la marca de negado' : 'Marcar como negado (por ejemplo, con Called by the Grave)') + '">' + (neg ? 'Quitar' : 'Negado') + '</button></li>';
     }).join('') + '</ol>'
-      + '<div class="chain-btns"><button type="button" class="primary" data-chain="resolve">' + (paused ? 'Seguir resolviendo' : 'Resolver cadena') + '</button>'
+      + chainBtns(paused);
+  }
+  /** Resolver cadena / Seguir resolviendo y Deshacer última declaración. En línea, js/pvp.js dice si te toca resolver. */
+  function chainBtns(paused) {
+    const pv = isPvp() ? pvpCall('chainUi', [], null) : null;
+    const res = pv && typeof pv === 'object' ? pv : { ok: true, label: paused ? 'Seguir resolviendo' : 'Resolver cadena', title: '' };
+    return '<div class="chain-btns"><button type="button" class="primary" data-chain="resolve"' + (res.ok ? '' : ' disabled') + (res.title ? ' title="' + esc(res.title) + '"' : '') + '>'
+      + esc(res.label || (paused ? 'Seguir resolviendo' : 'Resolver cadena')) + '</button>'
       + '<button type="button" data-chain="undo">Deshacer última declaración</button></div>';
   }
   function renderChain() {
@@ -3937,6 +3993,8 @@
    * Si responde, su eslabón entra a la cadena y sale la ventana "El rival responde". No toma foto propia:
    * "Deshacer" quita tu jugada y su respuesta juntas. */
   function botEvent(ev) {
+    // En línea: el rival es una persona; js/pvp.js le cuenta lo que hiciste (activaciones, ataques...) y él decide
+    if (isPvp()) { pvpCall('event', [ev]); return null; }
     if (!oppOn()) return null;
     const notes = arr(botCall('observe', [S, ev], []));
     oppNotes(notes);
@@ -4010,8 +4068,14 @@
       try {
         if (op.op === 'negateLink') {
           // fizzle (D.D. Crow): el eslabón no está negado, pero ya no puede usar la carta que se desterró
-          const t = S.chain[op.index];
-          if (t && !t.negated) t.negated = op.fizzle ? { by: op.by || src, fizzle: true } : { by: op.by || src };
+          // (En línea el eslabón llega por su clave lk; off: el rival quitó la marca)
+          const t = op.lk ? S.chain.find((x) => x && x.lk === op.lk) : S.chain[op.index];
+          if (t && op.off) {
+            if (t.negated) { delete t.negated; pushLog({ kind: 'opp', text: 'El rival quita la marca de negado de ' + q(nameById(t.id)) }); }
+          } else if (t && !t.negated) {
+            t.negated = op.fizzle ? { by: op.by || src, fizzle: true } : { by: op.by || src };
+            if (op.lk) pushLog({ kind: 'opp', text: 'El rival marca ' + q(nameById(t.id)) + ' como negado' + (op.by ? ' (por ' + byText(op.by) + ')' : '') });
+          }
         } else if (op.op === 'negateMonster') {
           const f = find(op.uid);
           if (!f || f.loc.area !== 'field') return;
@@ -4046,6 +4110,25 @@
           if (!moveNow(op.uid, 'deck', { noSnap: true, quiet: true, shuffle: !op.bottom, bottom: !!op.bottom })) return;
           pushLog({ kind: 'opp', text: q(f.c.name) + (lastWent === 'extra' ? ' vuelve a tu Extra Deck' : lastWent === 'gone' ? ' deja el campo y desaparece'
             : lastWent === 'opp' ? ' vuelve al rival (es su carta)' : op.bottom ? ' va al fondo de tu Mazo' : ' vuelve a tu Mazo (barajado)') + ' (por ' + by + ')' });
+        } else if (op.op === 'toHand') {
+          // En línea: de tu Cementerio o tu destierro a tu mano (los del Extra Deck vuelven al Extra Deck)
+          const f = find(op.uid);
+          if (!f || !(f.loc.area === 'gy' || f.loc.area === 'ban')) return;
+          if (!moveNow(op.uid, 'hand', { noSnap: true, quiet: true })) return;
+          pushLog({ kind: 'opp', text: q(f.c.name) + (lastWent === 'extra' ? ' vuelve a tu Extra Deck' : f.loc.area === 'gy' ? ' vuelve de tu Cementerio a tu mano' : ' vuelve del destierro a tu mano') + ' (por ' + by + ')' });
+        } else if (op.op === 'toGy') {
+          // En línea: de tu destierro a tu Cementerio
+          const f = find(op.uid);
+          if (!f || f.loc.area !== 'ban') return;
+          const [card] = S.ban.splice(f.loc.index, 1);
+          card.faceDown = false;
+          S.gy.push(card);
+          pushLog({ kind: 'opp', text: q(f.c.name) + ' vuelve del destierro a tu Cementerio (por ' + by + ')' });
+        } else if (op.op === 'setLp') {
+          // En línea: el rival ajusta tus LP a mano
+          const v = Math.max(0, Math.round(Number(op.value) || 0));
+          const before = Number(S.lp) || 0;
+          if (v !== before) { S.lp = v; pushLog({ kind: 'opp', text: 'El rival ajusta tus LP: ' + before + ' → ' + v + ' (a mano)' }); }
         } else if (op.op === 'position') {
           // VS (YGO.ai): cambia la posición de tu monstruo (to: 'atk' | 'def' | 'set')
           const f = find(op.uid);
@@ -4063,11 +4146,14 @@
           const nb = noBanish();
           if (nb) { pushLog({ kind: 'opp', text: q(f.c.name) + ' no se destierra (por ' + by + '): ' + noBanishText(nb) }); return; }
           if (f.loc.area === 'gy') {
-            S.ban.push(S.gy.splice(f.loc.index, 1)[0]);
-            pushLog({ kind: 'opp', text: q(f.c.name) + ' queda desterrada de tu Cementerio (por ' + by + ')' });
+            const card = S.gy.splice(f.loc.index, 1)[0];
+            if (op.faceDown) card.faceDown = true;
+            S.ban.push(card);
+            pushLog({ kind: 'opp', text: q(f.c.name) + ' queda desterrada' + (op.faceDown ? ' boca abajo' : '') + ' de tu Cementerio (por ' + by + ')' });
             return;
           }
           const went = banishFromField(op.uid);
+          if (op.faceDown && went === 'ban' && S.ban.length) S.ban[S.ban.length - 1].faceDown = true;
           pushLog({ kind: 'opp', text: q(f.c.name) + (went === 'gone' ? ' deja el campo y desaparece' : went === 'opp' ? ' queda desterrada en el destierro del rival (es su carta)'
             : ' queda desterrada de tu campo') + ' (por ' + by + ')' });
         } else if (op.op === 'bounce') {
@@ -4420,6 +4506,9 @@
    * Si hay jugadas anotadas, el título avisa que se borran. Lo elegido se recuerda en las preferencias. */
   function openSetup(opts, state) {
     opts = opts || {};
+    // En línea, con el duelo en juego: "Nuevo duelo" y el selector de mazo abren la sala (repartir de nuevo, el mazo del
+    // próximo duelo, salir). Terminado, son los de siempre (el selector sigue en la sala si hay alguien en ella)
+    if (isPvp() && !opts.leavePvp && pvpCall('wants', [opts], false)) { pvpCall('open', [opts]); return; }
     const B = bot();
     if (!state) freshPrefs();
     // Modo VS: solo si están sus cuatro módulos (si no, el botón VS queda apagado)
@@ -4610,6 +4699,8 @@
   /** Duelo nuevo con la misma mano inicial del actual (al pasar a ir primero, la 6ª carta, que fue el robo, vuelve al mazo).
    * o: { second, keepBot (mismas handtraps del rival), bot (otra configuración del rival) }. */
   function restartSameHand(o) {
+    // En línea, quién empieza lo elige el anfitrión de la sala (y repartir de nuevo lo hace la sala)
+    if (isPvp()) { pvpCall('open', [{}]); return; }
     const st = S && S.start;
     const cfg = { second: !!o.second, bot: Object.assign({}, o.bot || (st && st.bot) || botConfig()) };
     if (o.keepBot && S && S.opp) {
@@ -4881,9 +4972,23 @@
     $('#fd-end').addEventListener('click', () => endAttempt());
     // Prueba / VS: la ventana "Nuevo duelo" con ese tipo elegido (nada cambia hasta Empezar)
     $$('#fd-vmode [data-vmode]').forEach((b) => b.addEventListener('click', () => {
+      // En línea: la sala (crear o unirse) la maneja js/pvp.js
+      if (b.dataset.vmode === 'pvp') {
+        if (!vsReady() || !window.YGO.pvp) { toast(VS_OFF, 'bad'); return; }
+        pvpCall('open', [{}]);
+        return;
+      }
       const vs = b.dataset.vmode === 'vs';
       if (vs && !vsReady()) { toast(VS_OFF, 'bad'); return; }
-      openSetup({ vs });
+      // Con un duelo en línea en juego: primero se sale de la sala (el duelo termina)
+      if (isPvp() && pvpCall('live', [], false)) {
+        openDialog('¿Dejar el duelo en línea?', '<p>Para jugar ' + (vs ? 'contra la computadora' : 'en Prueba') + ' sales de la sala: el duelo termina y gana el rival.</p>', [
+          { label: 'Salir de la sala', kind: 'danger', action: () => { pvpCall('leave'); openSetup({ vs, leavePvp: true }); } },
+          { label: 'Cancelar' },
+        ]);
+        return;
+      }
+      openSetup({ vs, leavePvp: true });
     }));
     // VS: la barra (#fd-vs), tus LP y Rendirse los maneja js/vs.js
     const onEl = (sel, fn) => { const el = $(sel); if (el) el.addEventListener('click', fn); };
@@ -5062,7 +5167,9 @@
   function enter() {
     if (!d || !decks().includes(d)) {
       d = window.YGO.builder.current();
-      if (!enterVs()) newDuel();
+      // (en un duelo en línea en juego, el mazo nuevo queda para el próximo: este sigue)
+      if (isPvp() && pvpCall('live', [], false)) render();
+      else if (!enterVs()) newDuel();
     } else render();
     renderDeckSelect();
     // Una ventana del modo Automático que quedó esperando al cambiar de pantalla: cuenta como cerrada sin respuesta
@@ -5076,6 +5183,11 @@
    * Sin opts.bot, el rival es el de las preferencias (ventana Nuevo duelo). Sin opts.vs siempre es Prueba; con opts.vs
    * ({ rival: mazo o su id, firstPref, seed, pace, askOnly, responds, rivalHand, rivalOrder }) es un duelo VS. */
   function load(deckObj, handIds, restIds, opts) {
+    // Durante un duelo en línea no se reemplaza el campo desde la prueba de mano
+    if (isPvp() && pvpCall('live', [], false)) {
+      toast('Estás en un duelo en línea: para jugar esta mano, primero sal de la sala (En línea → Salir de la sala).', 'warn');
+      return false;
+    }
     d = deckObj;
     opts = Object.assign({ second: false }, opts);
     newDuel(handIds, restIds, opts);
@@ -5114,6 +5226,8 @@
   }
   const port = {
     S: () => S, deck: () => d, decks, prefs: () => freshPrefs(), savePref,
+    /** El mazo del campo (js/pvp.js, al empezar un duelo en línea con el mazo elegido en la sala) */
+    setDeck: (x) => { if (x && Array.isArray(x.main)) { d = x; renderDeckSelect(); } },
     render, toast, openDialog, closeModal, chooser, showCard, pickCards,
     modalOpen: () => !$('#modal').hidden, busy: () => !!(pending || autoBusy),
     pushLog: (entry, v) => pushLog(entry, v ? verdict(v) : null),

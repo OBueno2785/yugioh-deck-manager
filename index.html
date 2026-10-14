@@ -160,7 +160,7 @@
     <section class="fd-main">
       <div class="toolrow">
         <div id="fd-vmode" class="seg vmode" role="group" aria-label="Tipo de duelo">
-          <button type="button" data-vmode="prueba" aria-pressed="true" title="Practica tu combo contra handtraps">Prueba</button><button type="button" data-vmode="vs" aria-pressed="false" title="Duelo completo contra la computadora">VS</button>
+          <button type="button" data-vmode="prueba" aria-pressed="true" title="Practica tu combo contra handtraps">Prueba</button><button type="button" data-vmode="vs" aria-pressed="false" title="Duelo completo contra la computadora">VS</button><button type="button" data-vmode="pvp" aria-pressed="false" title="Duelo en línea contra otra persona (sala con código)">En línea</button>
         </div>
         <label class="sr" for="fd-deck">Mazo</label>
         <select id="fd-deck" class="deck-select"></select>
@@ -257,6 +257,9 @@
 <script src="js/attempts.js"></script>
 <script src="js/field.js"></script>
 <script src="js/vs.js"></script>
+<script src="js/vendor/peerjs.min.js"></script>
+<script src="js/net.js"></script>
+<script src="js/pvp.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

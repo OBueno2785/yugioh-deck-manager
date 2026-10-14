@@ -58,6 +58,15 @@
     return 'su campo';
   }
   const isVs = (S) => !!(S && S.vs && S.opp && S.opp.vs);
+  /** Duelo en línea (js/pvp.js): el rival es otra persona y S.opp es el espejo de lo público de su lado. */
+  const isPvp = (S) => !!(isVs(S) && S.vs.pvp && S.opp.pvp);
+  /** En línea, lo que un efecto tuyo le hace a una carta del rival se cambia aquí (para verlo ya) y además va como pedido a
+   * su dueño, que lo aplica de verdad (YGO.pvp.out). */
+  function out(S, op) {
+    if (!isPvp(S)) return;
+    const P = YGO.pvp;
+    if (P && typeof P.out === 'function') { try { P.out(S, op); } catch (e) { console.warn('YGO.pvp.out falló', e); } }
+  }
 
   /* ---------- Azar con semilla (el estado vive en S.opp.rng) ---------- */
   function mulberry(o) {
@@ -199,7 +208,8 @@
       if (!e) continue;
       const z = e.zone;
       const c = cardOf(e);
-      const fits = FIELD.includes(z) && !used.has(z) && (z !== 'fz' || !!(c && c.type & T.FIELD));
+      // (En línea, una Mágica de Campo boca abajo del rival llega sin código: se queda en su Zona de Campo)
+      const fits = FIELD.includes(z) && !used.has(z) && (z !== 'fz' || !!(c && c.type & T.FIELD) || (!c && !!e.faceDown && !!o.pvp));
       if (!fits) { bad.push(e); continue; }
       used.add(z);
       // Un monstruo en una Zona de M/T (puesto como Mágica): asSpell mantiene bien isMonsterEntry de bot.js
@@ -481,6 +491,7 @@
     const last = went === 'extra' ? o.extra[o.extra.length - 1] : went === 'ban' ? o.ban[o.ban.length - 1] : null;
     res.to = went;
     res.isHiddenNow = went === 'hand' || went === 'deck' || (went === 'extra' && !(last && last.extraFaceUp)) || (went === 'ban' && !!(last && last.faceDown));
+    out(S, { op: 'move', uid: inst.uid, from: f.where, dest, how, by: opts.by || '', faceDown: !!opts.faceDown, top: !!opts.top, bottom: !!opts.bottom, faceUp: !!opts.faceUp });
     return { ok: true, went, text: moveText(S, res) + extraText, ops };
   }
   /** Una carta del rival (del campo, un material o una pila) se va. how: destroy | battle | banish | banishFD | hand | deck | gy | send
@@ -529,6 +540,7 @@
    * rivalOrder?: ids (de arriba abajo), starters?: ids }. → { ok, first, coin, dropped, logs: [texto] } */
   function setup(S, cfg) {
     cfg = cfg || {};
+    if (cfg.pvp) return setupPvp(S, cfg.pvp);
     const RS = R(), BT = B();
     if (!S || typeof S !== 'object') throw new Error('Falta el estado del duelo');
     if (!RS || !BT || typeof BT.newOpponent !== 'function') throw new Error('Faltan YGO.rules o YGO.bot');
@@ -590,6 +602,47 @@
     if (dropped) logs.push(dropped === 1 ? '1 carta del mazo del rival no está en la base: se quita.' : dropped + ' cartas del mazo del rival no están en la base: se quitan.');
     logs.push('El rival juega solo; lo que no sabe simular no lo usa o queda en el registro como «no se simula».');
     return { ok: true, first, coin, dropped, logs };
+  }
+
+  /** Duelo en línea (js/pvp.js): el rival es otra persona en otro navegador. Su lado empieza vacío (5 cartas en la mano y
+   * su Mazo, solo como cantidades) y YGO.pvp lo va llenando con lo público que llega por la red. Aquí no hay mazo del
+   * rival, ni semilla, ni IA. p = { role: 'host'|'guest', duelId, first: 'me'|'rival', coin, firstPref, name, main, extra, code }.
+   * → { ok, first, coin, dropped: 0, logs } */
+  function setupPvp(S, p) {
+    p = p || {};
+    const RS = R(), BT = B();
+    if (!S || typeof S !== 'object') throw new Error('Falta el estado del duelo');
+    if (!RS) throw new Error('Faltan YGO.rules');
+    const o = BT && typeof BT.newOpponent === 'function' ? BT.newOpponent({ enabled: true, mode: 'smart', count: 0, pool: [], seed: 1 }) || {} : {};
+    // Cartas sin código (solo se sabe cuántas hay): uids propios, que nunca son de una carta real
+    const blank = (n, k) => Array.from({ length: Math.max(0, Math.floor(Number(n) || 0)) }, (_, i) => ({ uid: 'p-' + k + i, id: 0, faceDown: true, def: false }));
+    const main = Math.max(0, Number(p.main) || 40);
+    Object.assign(o, {
+      enabled: true, pool: [], hand: blank(Math.min(5, main), 'h'), deck: blank(Math.max(0, main - 5), 'd'), gy: [], ban: [], field: [],
+      initialHand: [], count: 0, vs: true, pvp: true, deckId: null, name: String(p.name || 'Rival').slice(0, 40),
+      extra: blank(p.extra, 'x'), lp: LP0, rseq: 0, ts: RS.newTurnState(),
+      ai: { turn: null, steps: 0, tried: {}, triggers: [], extraSummons: 0, sets: 0, fails: 0 },
+    });
+    const first = p.first === 'rival' ? 'rival' : 'me';
+    S.opp = o;
+    S.lp = LP0;
+    if (!Array.isArray(S.chain)) S.chain = [];
+    S.turnState = RS.newTurnState({ phase: 'draw' });
+    S.turnState.turn = 1;
+    S.turnState.mine = first === 'me';
+    S.vs = {
+      v: 1, pvp: { role: p.role === 'guest' ? 'guest' : 'host', duelId: String(p.duelId || ''), code: String(p.code || '') },
+      seed: 0, first, firstPref: ['me', 'rival', 'coin'].includes(p.firstPref) ? p.firstPref : 'coin', coin: !!p.coin,
+      pace: 'step', paused: false, askOnly: false, responds: false, rival: { id: null, name: o.name },
+      over: null, win: null, warned: {}, recorded: null,
+    };
+    tsOf(S);
+    sync(S);
+    const who = first === 'me' ? 'empiezas tú' : 'empieza ' + q(o.name);
+    const logs = ['Duelo en línea contra ' + q(o.name) + ' · ' + LP0 + ' LP · ' + who + '.'];
+    if (p.coin) logs.push('Moneda: ' + who + '.');
+    logs.push('Cada uno mueve sus cartas. Lo que un efecto tuyo le hace a una carta del rival lo aplica su dueño.');
+    return { ok: true, first, coin: !!p.coin, dropped: 0, logs };
   }
 
   /* ---------- Jugadas del rival ---------- */
@@ -766,6 +819,7 @@
     const e = f.entry;
     if (!e.faceDown) return { ok: true, entry: e, text: '' };
     e.faceDown = false;
+    out(S, { op: 'flip', uid });
     const text = 'Se voltea ' + q(nameOf(e)) + ' del rival' + (isMonsterEntry(e) ? ' (' + statLine(S, 'rival', e) + ')' : '') + '.';
     sync(S);
     return { ok: true, entry: e, text };
@@ -799,6 +853,7 @@
       }
     }
     if (to === 'set') { e.faceDown = true; e.def = true; } else { e.faceDown = false; e.def = to === 'def'; }
+    out(S, { op: 'position', uid, to, by: opts.by || '' });
     const name = q(nameOf(e));
     const by = opts.by ? ' (por ' + byText(opts.by) + ')' : '';
     let text;
@@ -818,6 +873,7 @@
     if (!f || f.where !== 'field') return { ok: false, why: 'Esa carta no está en el campo del rival.', entry: null, text: '' };
     const e = f.entry;
     e.negated = { turn: turnOf(S), by: by || '' };
+    out(S, { op: 'negate', uid, by: by || '' });
     sync(S);
     return { ok: true, entry: e, text: 'Los efectos de ' + rivalName(S, e) + ' quedan negados hasta el final del turno' + (by ? ' (por ' + byText(by) + ')' : '') + '.' };
   }
@@ -943,6 +999,7 @@
     if (res.target && res.target.flip) {
       const tt = onFieldOf(S, other, res.target.uid);
       if (tt) tt.inst.faceDown = false;
+      if (tt && other === 'rival') out(S, { op: 'flip', uid: res.target.uid });
     }
     const at = onFieldOf(S, side, res.attacker.uid);
     if (at) at.inst.attackedTurn = turn;
@@ -985,6 +1042,7 @@
     const before = lpOf(S, side);
     const after = Math.max(0, before - n);
     putLp(S, side, after);
+    if (side === 'rival' && n) out(S, { op: 'damage', amount: n, battle: why === 'battle', by: why === 'battle' ? '' : String(why || '') });
     let text = '';
     if (n) {
       if (why === 'battle') text = 'Daño de batalla: ' + (side === 'me' ? 'recibes ' : 'el rival recibe ') + n + ' (LP ' + before + ' → ' + after + ').';
@@ -998,6 +1056,8 @@
     const before = lpOf(S, side);
     const after = Math.max(0, Math.round(Number(v) || 0));
     putLp(S, side, after);
+    // En línea: un cambio (no el valor), para no pisar lo que el rival haya cambiado a la vez
+    if (side === 'rival' && after !== before) out(S, { op: 'lpDelta', delta: after - before });
     return { before, after, text: (side === 'me' ? 'Ajustas tus LP: ' : 'Ajustas los LP del rival: ') + before + ' → ' + after + ' (a mano).' };
   }
   /** El rival paga LP como costo (no puede pagar más de los que tiene). → { ok, before, after, text } */
@@ -1064,7 +1124,7 @@
 
   YGO.duel = {
     MZ, EMZ, ST, FIELD, MON,
-    mirror, zoneLabel, isVs, rand, shuffle,
+    mirror, zoneLabel, isVs, isPvp, rand, shuffle,
     setup, tsOf, zonesOf, rivalView, withRival, findRival, entryAt, monsters, spellTraps, freeZone, isMonsterEntry,
     sync, publicSide, publicCard, isPublic, rivalName, moveText,
     draw, summon, set, activatePlace, leave, flip, position, negate, moveRival,

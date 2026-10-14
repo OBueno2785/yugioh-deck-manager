@@ -220,13 +220,16 @@
     // Sin zona: las que no tienen una válida y las que comparten zona con otra (no se dibujan en el tablero)
     const drawn = new Set(Object.values(fieldOf(S)));
     const loose = arr(o.field).filter((e) => e && !drawn.has(e)).length;
-    return '<span class="opp-tag">Rival</span><span class="vs-deckname" title="' + esc('Mazo del rival: ' + name) + '">' + esc(q(name)) + '</span>'
-      + '<button type="button" class="vs-lp' + fx(ui, 'rival') + '" data-vsopp="lp" aria-label="LP del rival: ' + lp + ' (toca para ajustarlos)" title="Ajustar LP del rival">LP ' + lp + '</button>'
+    // En línea: el rival es una persona (su nombre, no el de su mazo); "Sala…" en vez de cambiar su mazo
+    const pvp = !!(S && S.vs && S.vs.pvp);
+    return '<span class="opp-tag">' + (pvp ? 'En línea' : 'Rival') + '</span><span class="vs-deckname" title="' + esc(pvp ? 'Rival en línea: ' + name : 'Mazo del rival: ' + name) + '">' + esc(q(name)) + '</span>'
+      + '<button type="button" class="vs-lp' + fx(ui, 'rival') + '" data-vsopp="lp" aria-label="LP del rival: ' + lp + (pvp ? ' (toca para hacerle daño o subirlos a mano)' : ' (toca para ajustarlos)') + '" title="' + (pvp ? 'Cambiar los LP del rival (a mano, se le avisa)' : 'Ajustar LP del rival') + '">LP ' + lp + '</button>'
       + '<span class="opp-group opp-hand" aria-label="Mano del rival: ' + cartas(hand) + '"><span class="opp-label">Mano</span>' + backs + '<b class="opp-n">' + hand + '</b></span>'
       + '<span class="vs-count" aria-label="Mazo del rival: ' + cartas(deck) + '"><span class="opp-label">Mazo</span><b>' + deck + '</b></span>'
       + '<span class="vs-count" aria-label="Extra Deck del rival: ' + cartas(extra) + '"><span class="opp-label">Extra</span><b>' + extra + '</b></span>'
       + (loose ? '<span class="opp-lock vs-nozone" title="No le quedó zona libre: búscala en el registro">' + cartas(loose) + ' sin zona</span>' : '')
-      + '<button type="button" class="opp-btn" data-vsopp="setup" title="Elegir otro mazo para el rival (Nuevo duelo)">Cambiar…</button>';
+      + (pvp ? '<button type="button" class="opp-btn" data-vsopp="setup" title="La sala en línea: código, revancha, salir">Sala…</button>'
+        : '<button type="button" class="opp-btn" data-vsopp="setup" title="Elegir otro mazo para el rival (Nuevo duelo)">Cambiar…</button>');
   }
   /** "LP 8000" para #vs-mylp. */
   const myLp = (S) => 'LP ' + lpText(S && S.lp);
@@ -282,6 +285,8 @@
     lp: { me: 'Los LP del rival llegaron a 0.', rival: 'Tus LP llegaron a 0.', draw: 'Los LP de los dos llegaron a 0 a la vez.' },
     deckout: { me: 'El rival no pudo robar: su Mazo está vacío.', rival: 'No pudiste robar: tu Mazo está vacío.', draw: 'Nadie pudo robar.' },
     concede: { me: 'El rival se rindió.', rival: 'Te rendiste.', draw: 'Empate.' },
+    left: { me: 'El rival salió de la sala.', rival: 'Saliste de la sala.', draw: 'Empate.' },
+    nostart: { me: 'El duelo no empezó.', rival: 'El duelo no empezó.', draw: 'El rival no pudo empezar el duelo.' },
   };
   /** Cuerpo de la ventana del final (el título ¡Ganaste! / Perdiste / Empate lo pone vs.js). */
   function endBody(over, stats, S) {

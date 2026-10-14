@@ -12,6 +12,8 @@
   const D = () => YGO.duel || null;
   const A = () => YGO.ai || null;
   const V = () => YGO.vsview || null;
+  const PV = () => YGO.pvp || null; // en línea (js/pvp.js): el rival es otra persona
+  const pvpOn = (s) => !!(s && s.vs && s.vs.pvp);
   const arr = (x) => (Array.isArray(x) ? x : []);
   const q = (name) => '«' + name + '»';
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -65,6 +67,13 @@
   const playable = (dk) => !!(dk && arr(dk.main).length >= 5);
   const oppLinks = (s) => arr(s && s.chain).some((l) => l && l.owner === 'opp');
   const myLinks = (s) => arr(s && s.chain).some((l) => l && l.owner !== 'opp' && !l.done);
+  /** ¿Terminó el duelo? En línea solo cuentan tus LP: los del rival los ve y los avisa su dueño (js/pvp.js). */
+  const outcome = (s) => {
+    if (!pvpOn(s) || (s.vs && s.vs.over)) return D().result(s);
+    return (Number(s.lp) || 0) <= 0 ? { winner: 'rival', why: 'lp', turn: turnOf(s) } : null;
+  };
+  /** En línea: lo que no se puede hacer ahora (sin conexión, pasando el turno…); '' si se puede. */
+  const pvpBlock = (s) => (pvpOn(s) && PV() && typeof PV().blockReason === 'function' ? String(PV().blockReason() || '') : '');
 
   /* ---------- Temporizador del rival ---------- */
   let timerKey = '';    // para qué es el temporizador pendiente ('tick', 'retry', 'win3'…)
@@ -105,6 +114,7 @@
    * ventana abierta o una jugada tuya a medias, vuelve a mirar en un rato. */
   function plan(s) {
     if (!s || !s.vs || s.vs.over || s.vs.paused || !onCampo()) return null; // al volver al campo se dibuja y sigue
+    if (pvpOn(s)) return null; // en línea no hay IA: el rival juega desde su navegador
     const w = s.vs.win;
     let want;
     if (w) {
@@ -137,7 +147,7 @@
   function stepNow() {
     const s = S();
     const p = P();
-    if (!s || running) return false;
+    if (!s || running || pvpOn(s)) return false;
     running = true;
     const from = arr(s.log).length;
     let act = null;
@@ -235,6 +245,9 @@
     const p = P();
     const w = s && s.vs && s.vs.win;
     if (!w) return;
+    // En línea: tu ataque lo calcula el rival (conoce su monstruo); su activación: Pasar
+    if (pvpOn(s) && w.kind === 'mine-attack') { if (arr(s.chain).length) p.resolveChain(); return; }
+    if (pvpOn(s) && w.kind === 'activation') { if (PV()) PV().pass(); return; }
     if (w.kind === 'mine-attack') { if (arr(s.chain).length) p.resolveChain(); else damageStep(); return; }
     if (arr(s.chain).length) {
       // La cadena (su eslabón y tus respuestas) se resuelve; al cerrarse, chainClosed sigue con la ventana
@@ -286,6 +299,7 @@
   function startAttack(uid) {
     const s = S();
     const d = D();
+    if (pvpBlock(s)) { P().toast(pvpBlock(s)); return; }
     const can = d.canAttack(s, 'me', uid);
     if (!can.ok) { P().toast(can.why || 'No puede atacar ahora.'); return; }
     const t = d.targets(s, 'me');
@@ -303,6 +317,7 @@
     const d = D();
     const uid = ui.attacker;
     if (!uid) return;
+    if (pvpBlock(s)) { ui = freshUi(); p.toast(pvpBlock(s)); p.render(); return; }
     const can = d.canAttack(s, 'me', uid);
     if (!can.ok) { ui = freshUi(); p.toast(can.why || 'No puede atacar ahora.'); p.render(); return; }
     const t = d.targets(s, 'me');
@@ -337,6 +352,7 @@
     const a = w.attack.side === 'me' ? myName(w.attack.attacker) : rivalName(w.attack.attacker);
     log('battle', 'El ataque de ' + a + ' no sigue.');
     s.vs.win = null;
+    if (pvpOn(s) && PV()) PV().attackStopped(w.attack);
     p.render();
   }
   /** Cambias de fase o pasas el turno con tu ataque declarado sin calcular el daño: no sigue (cuenta como hecho y queda
@@ -348,6 +364,8 @@
     const f = P().find(w.attack.attacker);
     log('battle', 'El ataque de ' + (f ? myName(w.attack.attacker) : 'tu monstruo') + ' no sigue.');
     s.vs.win = null;
+    // En línea, el rival también deja de esperarlo
+    if (pvpOn(s) && PV()) PV().attackStopped(w.attack);
   }
   /** ¿Tu atacante ya dejó el campo? (p. ej. «Sakuretsu Armor» del rival lo destruyó) */
   const attackerGone = (w) => { const f = P().find(w.attack.attacker); return !(f && f.loc && f.loc.area === 'field'); };
@@ -359,8 +377,11 @@
     const w = s.vs.win;
     if (!w || !w.attack) return;
     if (arr(s.chain).length) { p.toast('Primero resuelve la cadena.'); return; }
+    // En línea, el daño lo calcula quien defiende (sabe qué tiene boca abajo)
+    if (pvpOn(s) && w.attack.side === 'me') { p.toast('El daño lo calcula el rival cuando decide no responder.'); return; }
     const at = w.attack;
     const lines = [];
+    let fought = null;
     p.quiet(() => {
       const res = d.battle(s, { side: at.side, attacker: at.attacker, target: at.target });
       if (!res || res.ok === false) {
@@ -379,11 +400,14 @@
         lines.push(...arr(r && r.lines));
         if (r && arr(r.ops).length) p.applyOps(r.ops, 'Batalla');
       }
+      fought = res;
       s.vs.win = null;
       lines.forEach((t) => log('battle', t));
     });
+    // En línea: el atacante cierra su ataque (lo que le pasó a sus cartas ya le llegó como pedido)
+    if (pvpOn(s) && PV()) PV().battleDone(at, fought);
     p.lockUndo();
-    const over = d.result(s);
+    const over = outcome(s);
     if (over) { endDuel(over); return; }
     p.render();
   }
@@ -403,17 +427,20 @@
     s.vs.win = null;
     if (s.vs.recorded !== over.winner) {
       const dk = p.deck() || {};
-      try { d.record(s, { myDeckId: dk.id != null ? dk.id : null, myDeckName: dk.name || '' }); } catch (err) { console.warn('YGO.duel.record falló', err); }
-      log('vs', 'Fin del duelo: ' + TITLE[over.winner] + ' (turno ' + (over.turn || turnOf(s)) + ').');
+      // (En línea no se guarda en el historial del VS: ese es por mazo rival de la computadora)
+      if (!pvpOn(s)) { try { d.record(s, { myDeckId: dk.id != null ? dk.id : null, myDeckName: dk.name || '' }); } catch (err) { console.warn('YGO.duel.record falló', err); } }
+      else s.vs.recorded = over.winner;
+      log('vs', over.why === 'nostart' ? 'El duelo en línea no empezó: el rival no pudo repartir su mano.' : 'Fin del duelo: ' + TITLE[over.winner] + ' (turno ' + (over.turn || turnOf(s)) + ').');
     }
     p.lockUndo();
+    if (pvpOn(s) && PV()) PV().ended(over);
     p.render();
     showEnd();
   }
   function checkEnd() {
     const s = S();
     if (!s || !s.vs || s.vs.over) return false;
-    const over = D().result(s);
+    const over = outcome(s);
     if (over) { endDuel(over); return true; }
     return false;
   }
@@ -423,6 +450,14 @@
     const over = s && s.vs && s.vs.over;
     if (!over) return;
     let stats = null;
+    if (pvpOn(s)) {
+      p.openDialog(TITLE[over.winner] || 'Fin del duelo', V().endBody(over, null, s), [
+        { label: 'Ver el campo' },
+        { label: 'Salir de la sala', action: () => { if (PV()) PV().leave(); } },
+        { label: 'Revancha', kind: 'primary', action: rematch },
+      ]);
+      return;
+    }
     try { stats = D().statsVs(null, s.vs.rival ? s.vs.rival.id : null); } catch (err) { stats = null; }
     p.openDialog(TITLE[over.winner] || 'Fin del duelo', V().endBody(over, stats, s), [
       { label: 'Ver el campo' },
@@ -434,6 +469,7 @@
   function rematch() {
     const s = S();
     const p = P();
+    if (pvpOn(s)) { if (PV()) PV().rematch(); return; }
     const st = Object.assign({}, (s && s.start && s.start.vs) || {});
     const rival = deckById(st.rivalId != null ? st.rivalId : s && s.vs && s.vs.rival && s.vs.rival.id);
     if (!playable(rival)) { p.toast('El mazo del rival ya no está: elige otro.', 'bad'); p.openSetup({ vs: true }); return; }
@@ -513,9 +549,11 @@
 
   /* ---------- Límite de mano ---------- */
   /** Antes de pasar tu turno: con más de 6 cartas en la mano, descartas hasta 6 (luego sigue cont). */
-  function beforePass(cont) {
+  function beforePass(cont0) {
     const s = S();
     const p = P();
+    // En línea: antes de pasar el turno, el rival confirma que no está activando nada (js/pvp.js)
+    const cont = pvpOn(s) && PV() ? () => PV().askPass(cont0) : cont0;
     if (!isVs() || arr(s.hand).length <= HAND_MAX) { cont(); return; }
     const n = s.hand.length - HAND_MAX;
     const cands = s.hand.map((x) => ({ uid: x.uid, area: 'hand', c: p.cardOf(x), inst: x })).filter((x) => x.c);
@@ -629,6 +667,8 @@
           { id: 'vs-cancel', label: 'Cancelar' }],
       };
     }
+    // En línea: las ventanas, la cadena y el turno del rival los cuenta js/pvp.js (null: como siempre)
+    if (pvpOn(s) && PV()) { const m = PV().bar(s); if (m) return m; }
     const w = s.vs.win;
     const chain = arr(s.chain).length > 0;
     if (w && w.kind === 'mine-attack' && w.attack) {
@@ -680,6 +720,7 @@
     if (!isVs() || !btn) return;
     const s = S();
     const p = P();
+    if (/^pvp-/.test(btn.id || '')) { if (PV()) PV().barClick(btn.id); return; }
     switch (btn.id) {
       case 'vs-next': return next();
       case 'vs-stop': return stopAttack();
@@ -709,13 +750,13 @@
     }
     if (w) { continueWindow(); return; }
     if (arr(s.chain).length) { p.resolveChain(); return; }
-    if (!s.turnState.mine) { stepNow(); p.render(); }
+    if (!s.turnState.mine && !pvpOn(s)) { stepNow(); p.render(); }
   }
   function oppClick(btn) {
     if (!isVs() || !btn) return;
     const k = btn.dataset ? btn.dataset.vsopp : '';
     if (k === 'lp') adjustLp('rival');
-    else if (k === 'setup') P().openSetup({ vs: true });
+    else if (k === 'setup') { if (pvpOn(S()) && PV()) PV().open({}); else P().openSetup({ vs: true }); }
   }
 
   /* ---------- Ganchos de field.js ---------- */
@@ -800,12 +841,15 @@
         const at = w.attack;
         const still = at && at.side === 'rival' && (() => { try { const f = D().findRival(s, at.attacker); return !!(f && f.where === 'field'); } catch (err) { return false; } })();
         if (mineToo && still) { w.responded = true; p.render(); return; }
+        // En línea: el daño se calcula cuando tocas Seguir (el atacante también pudo responder); sin atacante, se detiene ya
+        if (pvpOn(s) && still) { w.responded = true; p.render(); return; }
         damageStep();
         return;
       }
       if (w.kind === 'activation' || w.kind === 'summon') { s.vs.win = null; p.lockUndo(); }
       // Tu ataque y la respuesta del rival se llevó a tu atacante: el ataque se detiene (sin esperar a Calcular daño)
-      if (w.kind === 'mine-attack' && w.attack && attackerGone(w)) { damageStep(); return; }
+      // (en línea lo decide el rival, que calcula el daño)
+      if (w.kind === 'mine-attack' && w.attack && attackerGone(w) && !pvpOn(s)) { damageStep(); return; }
     }
     p.render();
   }
@@ -822,6 +866,8 @@
       sawOpp = oppLinks(s);
       sawMine = myLinks(s);
     }
+    // En línea: el lado del rival (y sus eslabones) vuelven a como los dejó él, no a la foto vieja
+    if (pvpOn(s) && PV()) PV().restored();
   }
   function render() {
     if (!isVs()) return;
@@ -834,8 +880,8 @@
     // Tu ataque a medias ya no vale fuera de tu Fase de Batalla (field.js ya lo anotó al cambiar de fase; por si acaso)
     const w = s.vs.win;
     if (w && w.kind === 'mine-attack' && (!t.mine || t.phase !== 'battle')) dropAttack();
-    // Tu atacante dejó el campo (lo moviste a mano…): el ataque se detiene, después de este dibujo
-    else if (w && w.kind === 'mine-attack' && w.attack && !arr(s.chain).length && !running && !goneTimer && attackerGone(w)) {
+    // Tu atacante dejó el campo (lo moviste a mano…): el ataque se detiene, después de este dibujo (en línea lo ve el rival)
+    else if (w && w.kind === 'mine-attack' && w.attack && !arr(s.chain).length && !running && !goneTimer && attackerGone(w) && !pvpOn(s)) {
       const g = gen;
       goneTimer = setTimeout(() => {
         goneTimer = null;
@@ -860,7 +906,7 @@
       el.classList.toggle('can-attack', !!(free && x && attackOk(s, x.uid)));
     });
     // Se terminó por LP (un efecto, un ajuste…): el final, después de este dibujo
-    if (!s.vs.over && !endTimer && D().result(s)) {
+    if (!s.vs.over && !endTimer && outcome(s)) {
       const g = gen;
       endTimer = setTimeout(() => { endTimer = null; if (g === gen && isVs()) checkEnd(); }, 0);
     }
@@ -1047,7 +1093,10 @@
     reset, begin, turnChanged, beforePass, chainClosed, restored, render, ui: uiState, actions, positionVerdict,
     clickRival, barClick, oppClick, canRespond, setupHtml, bindSetup, readSetup, concede, adjustLp,
     // también para field.js / pruebas
-    endDuel, showEnd, rematch, startAttack, declareAttack, damageStep, continueWindow, schedule, dropAttack,
+    endDuel, checkEnd, showEnd, rematch, startAttack, declareAttack, damageStep, continueWindow, schedule, dropAttack,
+    // en línea (js/pvp.js): el ataque que declaró el rival desde su navegador abre la misma ventana que el de la IA
+    remoteAttack: (attacker, target) => { const s = S(); if (!isVs() || !pvpOn(s)) return false; const ok = rivalAttack(s, { attacker, target: target || null }); if (ok) P().render(); return ok; },
+    clearUi: () => { ui = freshUi(); },
     test,
   };
 })();
