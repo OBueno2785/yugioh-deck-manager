@@ -272,8 +272,22 @@
       // Mazos compartidos en el proyecto: se agregan una sola vez a la lista guardada
       const prefs = readPrefs();
       const added = Array.isArray(prefs.presetsAdded) ? prefs.presetsAdded : [];
+      const key = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       for (const p of window.YGO_PRESET_DECKS || []) {
         if (added.includes(p.presetId) || list.some((d) => d.presetId === p.presetId)) continue;
+        // Versión nueva de un mazo compartido: reemplaza al guardado de la versión anterior (mismo id, roles y,
+        // si lo renombraste, tu nombre) en lugar de agregar otro
+        const names = (p.replacesNames || []).map(key);
+        const old = list.filter((d) => (p.replaces || []).includes(d.presetId) || (names.length && names.includes(key(d.name))));
+        for (const d of old) {
+          if (names.includes(key(d.name))) d.name = p.name;
+          d.main = []; d.extra = []; d.side = [];
+          delete d.unknownIds;
+          d.pending = deck.placeEntries(d, deck.parseList(p.list));
+          d.presetId = p.presetId;
+          d.updated = Date.now();
+        }
+        if (old.length) { added.push(p.presetId); continue; }
         const d = deck.create(p.name, { presetId: p.presetId });
         d.pending = deck.placeEntries(d, deck.parseList(p.list));
         list.push(d);

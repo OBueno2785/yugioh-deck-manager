@@ -91,7 +91,7 @@
   }
   const defOf = (x) => (x == null ? null : BY_KEY.get(db.nameKey(String(x))) || BY_KEY.get(String(x)) || null);
   const shortOf = (name) => { const h = defOf(name); return h ? h.short : ''; };
-  // Lista por defecto: 3 copias de cada una, o lo que permita la banlist (Droll 2, Magnamhut 1, Gamma 1, Dimension Shifter 0)
+  // Lista por defecto: 3 copias de cada una, o lo que permita la banlist (Droll 1, Magnamhut 1, Gamma 1, Griffoh 1, Dimension Shifter 0)
   const DEFAULT_POOL = Object.values(HANDTRAPS).map((h) => ({ name: h.name, copies: Math.min(3, h.limit) }));
   // Las listas por defecto de antes: las 10 handtraps del principio y las 33 de la primera lista de Oscar.
   // Quien guardó una de ellas tal cual (mismos nombres y copias por defecto, en cualquier orden) recibe la nueva.
