@@ -292,7 +292,9 @@
         d.pending = deck.placeEntries(d, deck.parseList(p.list));
         list.push(d);
         added.push(p.presetId);
-        prefs.lastDeckId = d.id;
+        // Un mazo para el rival queda como "Mazo del rival" del modo VS; los demás pasan a ser tu mazo elegido
+        if (p.rival) prefs.vsRivalDeckId = d.id;
+        else prefs.lastDeckId = d.id;
       }
       prefs.presetsAdded = added;
       write(PREF, prefs);
