@@ -967,6 +967,7 @@
       pace: pick(cfg.pace || pr.vsPace, ['normal', 'fast', 'step'], 'normal'),
       askOnly: cfg.askOnly !== undefined ? cfg.askOnly !== false : pr.vsAskOnly !== false,
       responds: cfg.responds !== undefined ? cfg.responds !== false : pr.vsResponds !== false,
+      combos: cfg.combos !== undefined ? cfg.combos !== false : pr.vsCombos !== false,
     };
   }
   /** Filas VS de la ventana "Nuevo duelo" (todas con la clase su-vsrow). */
@@ -988,6 +989,8 @@
       + '<p class="hint su-note" id="su-pace-note">' + esc(paceNote(st.pace)) + '</p></div>'
       + '<label class="switch su-vsrow"><input type="checkbox" id="su-askonly"' + (st.askOnly ? ' checked' : '') + '><span>Detenerse solo cuando puedo responder</span></label>'
       + '<label class="switch su-vsrow"><input type="checkbox" id="su-responds"' + (st.responds ? ' checked' : '') + '><span>El rival responde en mi turno (handtraps y cartas colocadas)</span></label>'
+      + '<label class="switch su-vsrow"><input type="checkbox" id="su-combos" aria-describedby="su-combos-note"' + (st.combos ? ' checked' : '') + '><span>El rival usa sus combos grabados</span></label>'
+      + '<p class="hint su-note su-vsrow" id="su-combos-note">' + esc(combosNote(st.rival, st.combos)) + '</p>'
       + recordHtml(st.rival)
       + '<details class="su-help su-vsrow"><summary>Qué hace el rival (y qué no)</summary>' + help + '</details>';
   }
@@ -996,6 +999,16 @@
     const n = arr(dk.main).length;
     const x = arr(dk.extra).length;
     return n >= 40 ? n + ' cartas · Extra ' + x : 'Tiene ' + n + ' cartas: el rival puede quedarse sin cartas.' + (x ? ' · Extra ' + x : '');
+  }
+  /** Cuántos combos grabados tiene el mazo del rival (los graba "Grabar combo" en Prueba, js/combos.js). */
+  function combosNote(dk, use) {
+    const C = YGO.combos;
+    if (!dk || !C || typeof C.count !== 'function') return '';
+    let n = 0, on = 0;
+    try { n = C.count(dk.id); on = C.count(dk.id, true); } catch (err) { n = 0; on = 0; }
+    if (!n) return 'Este mazo no tiene combos grabados: grábalos en Prueba con «Grabar combo».';
+    const has = (n === 1 ? '1 combo grabado' : n + ' combos grabados') + (on < n ? ' (' + on + ' en uso)' : '');
+    return use === false ? has + ': este duelo no los usa.' : has + ': cuando su mano pueda empezar uno, lo juega.';
   }
   const paceNote = (pace) => ({ normal: 'Una jugada del rival cada 0,7 s.', fast: 'Una jugada cada 0,25 s.', step: 'Cada jugada del rival espera a que toques «Siguiente».' }[pace] || '');
   function recordText(dk) {
@@ -1025,6 +1038,14 @@
       if (n) n.textContent = rivalNote(dk);
       const r = $('#su-record', root);
       if (r) { const t = recordText(dk); r.textContent = t; r.hidden = !t; }
+      const cn = $('#su-combos-note', root);
+      if (cn) cn.textContent = combosNote(dk, comboBox());
+    });
+    const comboBox = () => { const b = $('#su-combos', root); return !b || b.checked; };
+    const cb = $('#su-combos', root);
+    if (cb) cb.addEventListener('change', () => {
+      const cn = $('#su-combos-note', root);
+      if (cn) cn.textContent = combosNote(sel ? deckById(sel.value) : setupDefaults({}).rival, cb.checked);
     });
   }
   /** Lo elegido en las filas VS → cfg para newDuel(…, { vs: cfg }) (y prefs: lo que se guarda). */
@@ -1039,9 +1060,9 @@
     const cfg = {
       rival, rivalId: rival ? rival.id : null,
       firstPref: pressed('first', st.first), pace: pressed('pace', st.pace),
-      askOnly: box('su-askonly', st.askOnly), responds: box('su-responds', st.responds),
+      askOnly: box('su-askonly', st.askOnly), responds: box('su-responds', st.responds), combos: box('su-combos', st.combos),
     };
-    cfg.prefs = { fieldVs: true, vsRivalDeckId: cfg.rivalId, vsFirst: cfg.firstPref, vsPace: cfg.pace, vsAskOnly: cfg.askOnly, vsResponds: cfg.responds };
+    cfg.prefs = { fieldVs: true, vsRivalDeckId: cfg.rivalId, vsFirst: cfg.firstPref, vsPace: cfg.pace, vsAskOnly: cfg.askOnly, vsResponds: cfg.responds, vsCombos: cfg.combos };
     return cfg;
   }
 

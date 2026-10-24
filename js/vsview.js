@@ -307,6 +307,7 @@
   const HELP = [
     'Juega su turno solo: roba, invoca (Normal, por Sacrificio, colocando, Enlace, Sincronía y Xyz), activa los efectos que el simulador entiende del todo, coloca cartas, ataca cuando le conviene y descarta al final.',
     'En tu turno responde con las handtraps que tiene de verdad en la mano y con algunas Trampas colocadas conocidas (Mirror Force, Trap Hole, Solemn…).',
+    'Con combos grabados (botón «Grabar combo» en Prueba, con su mazo), cuando su mano puede empezar uno lo juega paso a paso con sus cartas reales; si lo interrumpes, lo que dependía de eso no se hace y la línea se corta.',
     'Todavía no: Invocaciones por Fusión, Ritual o Péndulo; encadenar a tus respuestas; efectos con condiciones que no entiende (esos no los usa); cambios de ATK, protecciones y daño de penetración.',
     'Nunca ve tu mano ni tus cartas boca abajo, y tú tampoco las suyas.',
     'Si algo queda a medias, pulsa Pausar y hazlo a mano: toca una carta del rival para destruirla, desterrarla, devolverla… o ajusta los LP tocándolos.',

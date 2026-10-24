@@ -42,9 +42,9 @@
   // fieldSecond: ir segundo; botCount: 0 (sin rival) | 2 | 3 | '2-3'; botMode: 'smart' | 'aggressive'; botPool: [{ name, copies }]
   // fieldAuto: tus efectos en Automático (js/effects.js los lee y el campo los hace) o Manual (los haces tú)
   // fieldVs: el último tipo de duelo (Prueba o VS); vsRivalDeckId, vsFirst ('me'|'rival'|'coin'), vsPace ('normal'|'fast'|'step'),
-  // vsAskOnly y vsResponds: lo elegido para el modo VS en "Nuevo duelo"
+  // vsAskOnly, vsResponds y vsCombos (el rival repite sus combos grabados): lo elegido para el modo VS en "Nuevo duelo"
   const prefs = Object.assign({ handSize: 5, fieldStrict: true, fieldSecond: false, botCount: 0, botMode: 'smart', botPool: null, fieldAuto: false,
-    fieldVs: false, vsRivalDeckId: null, vsFirst: 'coin', vsPace: 'normal', vsAskOnly: true, vsResponds: true }, store.prefs());
+    fieldVs: false, vsRivalDeckId: null, vsFirst: 'coin', vsPace: 'normal', vsAskOnly: true, vsResponds: true, vsCombos: true }, store.prefs());
   const savePref = (patch) => { Object.assign(prefs, patch); store.savePrefs(Object.assign(store.prefs(), patch)); };
   // Antes el campo repartía prefs.handSize: quien tenía 6 practicaba ir segundo (se guarda una vez como fieldSecond)
   if (store.prefs().fieldSecond === undefined && Number(prefs.handSize) === 6) savePref({ fieldSecond: true });
@@ -78,6 +78,10 @@
   // undoFloor vive fuera de S a propósito: deshacer no debe devolver un piso viejo.
   let quiet = 0;
   let undoFloor = 0;
+  // Grabar un combo para el rival del VS (js/combos.js): { deckId, deckName, start (n.º absoluto de la foto con la que
+  // empieza: histBase + history.length al empezar), duelId }. Las fotos de history desde start y S son la grabación.
+  let rec = null;
+  const REC_CAP = 1500; // fotos que guarda history mientras graba (sin grabar, 150)
 
   const decks = () => window.YGO.builder.decks();
   const blank = () => {
@@ -321,7 +325,9 @@
   function snapshot() {
     if (quiet > 0) return; // un paso del rival (VS): sin foto
     history.push(JSON.stringify(S));
-    if (history.length > 150) { history.shift(); histBase++; }
+    const cap = rec ? REC_CAP : 150;
+    while (history.length > cap) { history.shift(); histBase++; }
+    if (rec && histBase > rec.start) { rec = null; toast('La grabación era demasiado larga: se canceló', 'warn'); }
   }
   function undo() {
     // (VS: al empezar tu turno, lo de antes es del rival)
@@ -341,10 +347,27 @@
   /** ¿Hay jugadas anotadas después de repartir? (el robo de quien va segundo no cuenta) */
   const hasPlays = () => !!(S && Array.isArray(S.log) && S.log.length > (Number(S.setupLog) || 0));
   /** Antes de borrar una partida con jugadas anotadas, pregunta. */
-  function confirmRestart(go) {
+  function confirmRestart(go, opts) {
     if (!hasPlays()) { go(); return; }
-    openDialog('¿Empezar un duelo nuevo?', '<p class="hint">Se borra la partida actual: el campo, la cadena y el registro de jugadas.</p>',
+    const n = rec ? Math.max(0, histBase + history.length - rec.start) : 0;
+    const recNote = !rec ? '' : opts && opts.keepRec ? ' La grabación del combo vuelve a empezar desde el principio del turno.'
+      : ' También se cancela la grabación del combo (' + n + (n === 1 ? ' jugada' : ' jugadas') + ').';
+    openDialog('¿Empezar un duelo nuevo?', '<p class="hint">Se borra la partida actual: el campo, la cadena y el registro de jugadas.' + esc(recNote) + '</p>',
       [{ label: 'Cancelar' }, { label: 'Nuevo duelo', kind: 'primary', action: go }]);
+  }
+  /** Reiniciar o cambiar Primero / Segundo mientras grabas: el duelo vuelve a empezar y la grabación también (como Reset en
+   * Dueling Nexus), si se puede grabar desde ahí. → true si sigue grabando */
+  function restartKeepingRec(fn) {
+    const keep = rec;
+    rec = null; // (si no, render la cancela al ver otro duelo)
+    fn();
+    if (keep && !recBlock()) {
+      rec = Object.assign({}, keep, { start: histBase + history.length, duelId: S.duelId });
+      render();
+      return true;
+    }
+    if (keep) toast('Grabación cancelada', 'warn');
+    return false;
   }
 
   /** Duelo nuevo. handIds/restIds: mano y mazo exactos (si no, se reparte al azar).
@@ -356,6 +379,8 @@
     // VS: lo que esperaba el duelo anterior (temporizadores del rival, ventanas) ya no sigue
     vsCall('reset');
     undoFloor = 0;
+    // La última ventana cerrada guarda su HTML (p. ej. los pasos de un combo con las cartas del mazo que ahora usa el rival)
+    if ($('#modal').hidden) $('#modal-body').innerHTML = '';
     const second = opts.second !== undefined ? !!opts.second : !!freshPrefs().fieldSecond;
     // Una ventana del campo que quedó abierta (p. ej. "El rival responde" del duelo anterior) ya no vale
     if (dialogOpen || pileOpen) closeModal();
@@ -410,7 +435,7 @@
     const v = S.vs;
     S.start = {
       deckId: d.id, hand: S.hand.map((x) => x.id), second: r.first === 'rival',
-      vs: { rivalId: v.rival ? v.rival.id : null, firstPref: v.firstPref, pace: v.pace, askOnly: v.askOnly, responds: v.responds },
+      vs: { rivalId: v.rival ? v.rival.id : null, firstPref: v.firstPref, pace: v.pace, askOnly: v.askOnly, responds: v.responds, combos: v.combos !== false },
     };
     render();
     vsCall('begin');
@@ -3276,13 +3301,14 @@
       el.type = 'button';
       el.textContent = b.label;
       el.className = b.kind || '';
+      if (b.focus) el.dataset.focus = '1';
       el.addEventListener('click', () => { if (!b.keep) closeModal(); if (b.action) b.action(); });
       foot.appendChild(el);
     });
     $('#modal').hidden = false;
     dialogOpen = true;
     dismissFn = typeof onDismiss === 'function' ? onDismiss : null;
-    const first = $('.primary', foot) || foot.lastChild;
+    const first = $('[data-focus]', foot) || $('.primary', foot) || foot.lastChild;
     if (first && !(opts && opts.keepFocus)) setTimeout(() => first.focus(), 30);
   }
   function closeModal() {
@@ -3524,6 +3550,11 @@
   function render() {
     if (!S) return;
     ensureState();
+    // La grabación sigue solo en el mismo duelo de Prueba y sin deshacer hasta antes de empezar
+    if (rec && (S.duelId !== rec.duelId || isVs() || histBase + history.length < rec.start)) {
+      rec = null;
+      setTimeout(() => toast('Grabación cancelada', 'warn'), 0);
+    }
     // VS: zonas del rival al día y su Zona Extra bloqueada en tu marco (YGO.duel.sync)
     const vs = isVs();
     if (vs) duelCall('sync', [S]);
@@ -3613,6 +3644,7 @@
     $('#fd-strict').checked = strict();
     renderAutoSwitch();
     $('#fd-log-btn').textContent = 'Registro (' + S.log.length + ')';
+    renderRecBtn();
     // VS: sin intentos; en el turno del rival (o con el duelo terminado) tus fases y tu turno no se tocan; Rendirse a la vista
     const vs = isVs();
     const cc = $('#fd-concede');
@@ -3642,7 +3674,8 @@
     $('#board').classList.toggle('picking', !!pending);
     $('#fd-pick').hidden = !picking;
     $('#fd-confirm').hidden = !picking;
-    if (!pending) return;
+    // Sin jugada a medias la banda queda vacía (oculta, pero con nombres de cartas: en VS el mazo rival puede ser el mismo)
+    if (!pending) { $('#fd-pending-text').textContent = ''; $('#fd-pick').innerHTML = ''; return; }
     const f = find(pending.uid);
     if (!picking) {
       $('#fd-pending-text').textContent = {
@@ -4529,12 +4562,14 @@
     const myDeck = opts.deck || d;
     const vsCfg = st.vsCfg || {
       deck: myDeck, myDeckId: myDeck ? myDeck.id : null, rivalId: prefs.vsRivalDeckId, firstPref: prefs.vsFirst || 'coin',
-      pace: prefs.vsPace || 'normal', askOnly: prefs.vsAskOnly !== false, responds: prefs.vsResponds !== false,
+      pace: prefs.vsPace || 'normal', askOnly: prefs.vsAskOnly !== false, responds: prefs.vsResponds !== false, combos: prefs.vsCombos !== false,
     };
     vsCfg.deck = myDeck;
     vsCfg.myDeckId = myDeck ? myDeck.id : null;
     const vsRows = ready ? String(vsCall('setupHtml', [vsCfg], '') || '') : '';
-    const body = (busy ? '<p class="setup-warn">Se borra la partida actual: el campo, la cadena y el registro de jugadas.</p>' : '')
+    const recN = rec ? Math.max(0, histBase + history.length - rec.start) : 0;
+    const recWarn = rec ? ' También se cancela la grabación del combo (' + recN + (recN === 1 ? ' jugada' : ' jugadas') + ').' : '';
+    const body = (busy || rec ? '<p class="setup-warn">' + (busy ? 'Se borra la partida actual: el campo, la cadena y el registro de jugadas.' : '') + esc(recWarn) + '</p>' : '')
       + '<div class="field su-type"><span>Tipo de duelo</span><div class="seg" id="su-vs" role="group" aria-label="Tipo de duelo">'
       + '<button type="button" data-vs="0" aria-pressed="' + !st.vs + '">Prueba</button>'
       + '<button type="button" data-vs="1" aria-pressed="' + st.vs + '"' + (ready ? '' : ' disabled title="' + VS_OFF + '"') + '>VS</button></div>'
@@ -4621,6 +4656,7 @@
       if (['normal', 'fast', 'step'].includes(cfg.pace)) patch.vsPace = cfg.pace;
       if (typeof cfg.askOnly === 'boolean') patch.vsAskOnly = cfg.askOnly;
       if (typeof cfg.responds === 'boolean') patch.vsResponds = cfg.responds;
+      if (typeof cfg.combos === 'boolean') patch.vsCombos = cfg.combos;
       savePref(patch);
       if (opts.deck) d = opts.deck;
       newDuel(null, null, { vs: cfg });
@@ -4711,6 +4747,163 @@
     let hand = st.hand.slice();
     if (!cfg.second && st.second) hand = hand.slice(0, 5);
     newDuel(hand, restOf(hand), cfg);
+  }
+
+  /* ---------- Grabar combos para el rival del VS (js/combos.js) ----------
+   * Juegas un turno en Prueba con un mazo; al terminar, la grabación (las fotos de history desde que empezó) se convierte
+   * en pasos y queda guardada para ese mazo. En VS, cuando el rival usa ese mazo, repite la línea (js/ai.js). */
+  const comboCall = (name, args, fallback) => modCall('combos', name, args, fallback);
+  const combosReady = () => !!(window.YGO.combos && typeof window.YGO.combos.build === 'function');
+  /** ¿Se puede empezar a grabar ahora? (Prueba, tu turno, sin rival de handtraps, sin cadena y nada en el campo, el
+   * Cementerio ni las desterradas) → '' | por qué no */
+  function recBlock() {
+    if (!S || isVs()) return 'Los combos se graban en Prueba.';
+    if (pending || autoBusy) return 'Termina primero lo que estás haciendo.';
+    if (oppOn()) return 'Con el rival de handtraps sus respuestas se mezclarían con tu línea.';
+    if (!S.turnState.mine || S.chain.length || FIELD_ZONES.some((z) => S.zones[z].length) || S.gy.length || S.ban.length) return 'El campo ya no está al principio del turno.';
+    return '';
+  }
+  function startRec() {
+    rec = { deckId: d.id, deckName: d.name, start: histBase + history.length, duelId: S.duelId };
+    toast('Grabando: juega tu turno y toca «Terminar» (el botón rojo)', 'ok');
+    render();
+    focusRec();
+  }
+  /** El foco vuelve al botón al cerrar las ventanas de combos (si no, queda en la página). */
+  const focusRec = () => setTimeout(() => { const b = $('#fd-rec'); if (b && !b.hidden && $('#modal').hidden) b.focus(); }, 40);
+  /** Botón Grabar combo / Terminar (con cuántas jugadas lleva). */
+  function renderRecBtn() {
+    const b = $('#fd-rec');
+    if (!b) return;
+    b.hidden = !combosReady() || isVs();
+    const n = rec ? Math.max(0, histBase + history.length - rec.start) : 0;
+    b.classList.toggle('rec-on', !!rec);
+    b.textContent = rec ? 'Terminar (' + n + ')' : 'Grabar combo';
+    b.title = rec ? 'Termina la grabación y guarda el combo para el CPU' : 'Graba un turno para que el CPU lo repita con este mazo en VS';
+    b.setAttribute('aria-label', rec ? 'Terminar la grabación del combo (' + n + (n === 1 ? ' jugada' : ' jugadas') + ')' : 'Grabar combo para el CPU');
+  }
+  const comboList = () => (d && combosReady() ? arr(comboCall('list', [d.id], [])) : []);
+  const comboMeta = (c) => c.steps.length + (c.steps.length === 1 ? ' paso' : ' pasos') + ' · mano: ' + (arr(comboCall('handNames', [c], [])).join(', ') || '—');
+  /** Los pasos de un combo como lista numerada. */
+  function stepsHtml(c) {
+    const items = c.steps.map((st) => {
+      const t = comboCall('describe', [c, st], { title: '', detail: [] });
+      return '<li><b>' + esc(t.title) + '</b>' + arr(t.detail).map((x) => '<span class="cb-det">' + esc(x) + '</span>').join('') + '</li>';
+    });
+    const fin = arr(comboCall('finalNames', [c], []));
+    return '<ol class="cb-steps">' + items.join('') + '</ol>' + (fin.length ? '<p class="hint">Campo final: ' + esc(fin.join(', ')) + '</p>' : '');
+  }
+  /** Enter en el campo de nombre = el botón principal de la ventana. */
+  function enterSaves(inp) {
+    if (!inp) return;
+    inp.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      const b = $('#modal-foot .primary');
+      if (b) b.click();
+    });
+    setTimeout(() => { inp.focus(); inp.select(); }, 30);
+  }
+  /** Ventana "Combos para el CPU" del mazo del campo: la lista, usar sí/no, ver, renombrar, borrar y grabar uno nuevo. */
+  function openCombos() {
+    if (!d || !combosReady()) return;
+    const list = comboList();
+    const why = recBlock();
+    const rows = list.map((c) => {
+      const nm = esc(q(c.name));
+      return '<li class="cb-row"><label class="switch"><input type="checkbox" data-cb-on="' + esc(c.id) + '"' + (c.enabled !== false ? ' checked' : '')
+        + ' aria-label="El CPU usa ' + nm + '"><span class="cb-name">' + esc(c.name) + '</span></label><span class="cb-meta">' + esc(comboMeta(c)) + '</span><span class="cb-btns">'
+        + '<button type="button" data-cb-view="' + esc(c.id) + '" aria-label="Ver los pasos de ' + nm + '">Ver pasos</button>'
+        + '<button type="button" data-cb-ren="' + esc(c.id) + '" aria-label="Renombrar ' + nm + '">Renombrar</button>'
+        + '<button type="button" class="danger" data-cb-del="' + esc(c.id) + '" aria-label="Borrar ' + nm + '">Borrar</button></span></li>';
+    }).join('');
+    const body = '<p>Juega una vez tu turno con ' + esc(q(d.name)) + ' como quieres que lo juegue el CPU. En VS, cuando el rival use este mazo y su mano tenga las cartas para'
+      + ' empezar la línea, la repite con sus cartas reales. Si lo interrumpes (Ash, Droll, Nibiru, Veiler...), lo que dependía de eso no se hace y la línea se corta.</p>'
+      + '<p class="hint">Declara las activaciones (toca la carta → Activar) para que en VS puedas responderle; lo que solo muevas, el CPU lo mueve sin activar nada.'
+      + ' No se graban los ataques, lo que hagas en el campo del rival ni lo que pase después de pasar el turno.</p>'
+      + (list.length ? '<ul class="cb-list">' + rows + '</ul>' : '<p class="hint" id="cb-empty">Todavía no grabaste ningún combo con este mazo.</p>')
+      + (why && !isVs() ? '<p class="hint cb-why">' + esc(why) + ' «Reiniciar y grabar» empieza de nuevo con la misma mano y sin rival de handtraps.</p>' : '');
+    const go = () => { if (!recBlock()) { startRec(); return; } restartSameHand({ second: !!(S.start && S.start.second), bot: { enabled: false } }); if (!recBlock()) startRec(); };
+    const buttons = isVs() ? [{ label: 'Cerrar', kind: 'primary', action: focusRec }]
+      : [{ label: 'Cerrar', action: focusRec }, { label: why ? 'Reiniciar y grabar' : 'Grabar combo nuevo', kind: 'primary', action: go }];
+    openDialog('Combos para el CPU', body, buttons, focusRec);
+    const root = $('#modal-body');
+    $$('[data-cb-on]', root).forEach((el) => el.addEventListener('change', () => {
+      const ok = comboCall('update', [el.dataset.cbOn, { enabled: el.checked }], null);
+      toast(!ok ? 'No se pudo cambiar el combo' : el.checked ? 'El CPU usa este combo' : 'El CPU no usa este combo', ok ? 'ok' : 'bad');
+    }));
+    const byId = (x) => list.find((c) => c.id === x) || null;
+    $$('[data-cb-view]', root).forEach((el) => el.addEventListener('click', () => {
+      const c = byId(el.dataset.cbView);
+      if (c) openDialog(c.name, '<p class="hint">' + esc(comboMeta(c)) + '</p>' + stepsHtml(c), [{ label: 'Volver', kind: 'primary', action: openCombos }], openCombos);
+    }));
+    $$('[data-cb-ren]', root).forEach((el) => el.addEventListener('click', () => {
+      const c = byId(el.dataset.cbRen);
+      if (!c) return;
+      openDialog('Renombrar combo', '<label class="field"><span>Nombre</span><input id="cb-rename" type="text" maxlength="80" value="' + esc(c.name) + '"></label>', [
+        { label: 'Cancelar', action: openCombos },
+        { label: 'Guardar', kind: 'primary', action: () => { const v = ($('#cb-rename') || {}).value || ''; if (v.trim()) comboCall('update', [c.id, { name: v }]); openCombos(); } },
+      ], openCombos, { keepFocus: true });
+      enterSaves($('#cb-rename'));
+    }));
+    $$('[data-cb-del]', root).forEach((el) => el.addEventListener('click', () => {
+      const c = byId(el.dataset.cbDel);
+      if (!c) return;
+      openDialog('¿Borrar el combo?', '<p>' + esc(q(c.name)) + ' se borra y el CPU ya no lo usa.</p>', [
+        { label: 'Cancelar', focus: true, action: openCombos },
+        { label: 'Borrar', kind: 'danger', action: () => { comboCall('remove', [c.id]); toast('Combo borrado', 'ok'); openCombos(); } },
+      ], openCombos);
+    }));
+  }
+  /** Terminar grabación: arma el combo con las fotos y pide un nombre para guardarlo (draft: el nombre que ya escribiste). */
+  function finishRec(draft) {
+    if (!rec) return;
+    if (pending || autoBusy) { toast('Termina primero lo que estás haciendo'); return; }
+    if (S.chain.length) { toast('Resuelve la cadena antes de terminar la grabación'); return; }
+    const from = rec.start - histBase;
+    if (from < 0 || from > history.length) { rec = null; toast('Grabación cancelada', 'warn'); render(); return; }
+    let r = null;
+    try {
+      const states = history.slice(from).map((h) => JSON.parse(h)).concat([JSON.parse(JSON.stringify(S))]);
+      r = comboCall('build', [states, { deckId: rec.deckId, deckName: rec.deckName }], null);
+    } catch (err) { console.warn('No se pudo armar el combo', err); r = null; }
+    const stop = () => { rec = null; render(); focusRec(); };
+    if (!r || !r.ok) {
+      openDialog('Terminar grabación', '<p>' + esc(r && r.why ? r.why : 'No se pudo armar el combo.') + '</p>', [
+        { label: 'Descartar', action: () => { stop(); toast('Grabación descartada', 'ok'); } },
+        { label: 'Seguir grabando', kind: 'primary', action: focusRec },
+      ], focusRec);
+      return;
+    }
+    const c = r.combo;
+    const declared = c.steps.some((st) => st.t === 'act' && st.links.some((l) => !l.inferred));
+    const saved = comboList();
+    const full = saved.length >= (Number(window.YGO.combos && window.YGO.combos.CAP) || 30);
+    const name = typeof draft === 'string' && draft.trim() ? draft : c.name;
+    const body = '<label class="field"><span>Nombre</span><input id="cb-name" type="text" maxlength="80" value="' + esc(name) + '"></label>'
+      + '<p class="hint">' + esc(comboMeta(c)) + '</p>' + stepsHtml(c)
+      + (declared ? '' : '<p class="hint cb-warn">No declaraste ninguna activación: en VS el CPU moverá las cartas sin activar nada y no podrás responderle con handtraps.</p>')
+      + (c.skipped ? '<p class="hint">Los ataques y lo que hiciste en la Fase de Batalla o la Final no se graban.</p>' : '')
+      + (c.afterTurn ? '<p class="hint">Lo que hiciste después de pasar el turno no se graba.</p>' : '')
+      + (c.cut ? '<p class="hint">El combo es muy largo: se guardan sus primeros ' + c.steps.length + ' pasos.</p>' : '')
+      + (full ? '<p class="hint cb-warn">Este mazo ya tiene ' + saved.length + ' combos (el máximo): al guardar se borra el más viejo, ' + esc(q(saved[saved.length - 1].name)) + '.</p>' : '');
+    const typed = () => (($('#cb-name') || {}).value || '');
+    openDialog('Guardar combo para el CPU', body, [
+      { label: 'Descartar', action: () => { const keep = typed(); openDialog('¿Descartar la grabación?', '<p>Se pierde lo que grabaste.</p>', [
+        { label: 'Volver', focus: true, action: () => finishRec(keep) },
+        { label: 'Descartar', kind: 'danger', action: () => { stop(); toast('Grabación descartada', 'ok'); } },
+      ], () => finishRec(keep)); } },
+      { label: 'Seguir grabando', action: focusRec },
+      { label: 'Guardar', kind: 'primary', action: () => {
+        const v = typed().trim();
+        const out = comboCall('add', [Object.assign({}, c, { name: v || c.name })], null);
+        stop();
+        if (!out) toast('No se pudo guardar el combo', 'bad');
+        else if (out.unsaved) toast('El navegador no deja guardar (almacenamiento lleno o bloqueado): el combo dura hasta que cierres la página', 'warn');
+        else toast('Combo guardado: el CPU lo usa cuando juega con ' + q(c.deckName || d.name) + ' en VS', 'ok');
+      } },
+    ], focusRec, { keepFocus: true });
+    enterSaves($('#cb-name'));
   }
 
   /* ---------- Intentos (js/attempts.js) ----------
@@ -4933,18 +5126,18 @@
       if (!S || !!(S.start && S.start.second) === second) return;
       confirmRestart(() => {
         savePref({ fieldSecond: second });
-        restartSameHand({ second, keepBot: true });
-        toast(second ? 'Vas segundo: robaste 1 carta en la Fase de Robo' : 'Vas primero: 5 cartas, sin robo ni Fase de Batalla', 'ok');
-      });
+        const recOn = restartKeepingRec(() => restartSameHand({ second, keepBot: true }));
+        toast((second ? 'Vas segundo: robaste 1 carta en la Fase de Robo' : 'Vas primero: 5 cartas, sin robo ni Fase de Batalla') + (recOn ? ' · sigues grabando' : ''), 'ok');
+      }, { keepRec: true });
     }));
     $('#fd-new').addEventListener('click', () => openSetup());
     // Reiniciar (como "Reset" en Dueling Nexus): el mismo duelo desde el principio, con la misma mano y las mismas handtraps
     $('#fd-reset').addEventListener('click', () => {
       if (!S || isVs()) return;
       confirmRestart(() => {
-        restartSameHand({ second: !!(S.start && S.start.second), keepBot: true });
-        toast('De nuevo con la misma mano' + (oppOn() ? ' y las mismas handtraps del rival' : ''), 'ok');
-      });
+        const recOn = restartKeepingRec(() => restartSameHand({ second: !!(S.start && S.start.second), keepBot: true }));
+        toast('De nuevo con la misma mano' + (oppOn() ? ' y las mismas handtraps del rival' : '') + (recOn ? ': sigues grabando desde el principio' : ''), 'ok');
+      }, { keepRec: true });
     });
     $$('#fd-tabs [data-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
     // Ficha de la carta al pasar el mouse (escritorio, sin una carta elegida)
@@ -4970,6 +5163,8 @@
       }).observe(stage);
     }
     $('#fd-end').addEventListener('click', () => endAttempt());
+    // Grabar combo (Prueba): la lista del mazo y grabar uno nuevo; mientras graba, terminar y guardar
+    { const rb = $('#fd-rec'); if (rb) rb.addEventListener('click', () => { if (rec) finishRec(); else openCombos(); }); }
     // Prueba / VS: la ventana "Nuevo duelo" con ese tipo elegido (nada cambia hasta Empezar)
     $$('#fd-vmode [data-vmode]').forEach((b) => b.addEventListener('click', () => {
       // En línea: la sala (crear o unirse) la maneja js/pvp.js
@@ -5158,7 +5353,7 @@
     if (!p.fieldVs || !vsReady()) return false;
     const rival = decks().find((x) => x && p.vsRivalDeckId != null && String(x.id) === String(p.vsRivalDeckId));
     if (rival && arr(rival.main).length >= 5) {
-      newDuel(null, null, { vs: { rival, firstPref: p.vsFirst, pace: p.vsPace, askOnly: p.vsAskOnly !== false, responds: p.vsResponds !== false } });
+      newDuel(null, null, { vs: { rival, firstPref: p.vsFirst, pace: p.vsPace, askOnly: p.vsAskOnly !== false, responds: p.vsResponds !== false, combos: p.vsCombos !== false } });
       if (isVs()) return true;
     } else newDuel();
     openSetup({ vs: true });

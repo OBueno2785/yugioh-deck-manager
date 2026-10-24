@@ -12,6 +12,7 @@
   const E = () => YGO.effects;
   const B = () => YGO.bot || {};
   const D = () => YGO.duel;
+  const C = () => YGO.combos || null; // combos grabados (js/combos.js): sus líneas de Prueba, repetidas
 
   /* ---------- Constantes ---------- */
   const MZ = ['mz0', 'mz1', 'mz2', 'mz3', 'mz4'];
@@ -827,7 +828,7 @@
     if ((S.vs && (S.vs.over || S.vs.win)) || S.turnState.mine !== false || arr(S.chain).length) return null;
     const ai = aiOf(S);
     const act = decide(S, ai);
-    if (act) ai.steps++;
+    if (act && act.kind !== 'script') ai.steps++; // (el combo grabado tiene su largo: no cuenta para MAX_STEPS)
     return act;
   }
   function decide(S, ai) {
@@ -840,6 +841,10 @@
     }
     if (phase === 'standby') return { kind: 'phase', to: 'main1', key: 'phase::main1' };
     if (phase === 'main1' || phase === 'main2') {
+      // Primero, un combo grabado de su mazo (si su mano lo puede empezar); al terminar o cortarse sigue lo de siempre
+      let sa = null;
+      try { sa = C() && typeof C().nextAct === 'function' ? C().nextAct(S, ai) : null; } catch (err) { console.error('YGO.combos.nextAct falló', err); sa = null; }
+      if (sa) return sa;
       const m1 = phase === 'main1';
       const steps = [
         () => triggerAct(cx),
@@ -901,6 +906,7 @@
         case 'position': case 'flip': return runPosition(S, act);
         case 'discard': return runDiscard(S, act);
         case 'note': return { ok: true, logs: [{ kind: 'opp', text: act.text }], window: null };
+        case 'script': return C() ? C().run(S, act) : fail(S, act, 'Sin combos');
         case 'draw': {
           const r = D().draw(S, 1, { normal: true });
           return { ok: true, logs: [{ kind: 'opp', text: textOf(r, 'El rival roba 1 carta.') }], window: null, empty: !!(r && r.empty) };
@@ -1090,8 +1096,9 @@
   /* ---------- Resolver sus eslabones ---------- */
   const isAshName = (id) => same(nameById(id), ASH);
   /** ¿El plan de su eslabón añade del Mazo, Invoca del Mazo o manda del Mazo al Cementerio? (lo que niega Ash Blossom) */
-  function ashFits(L) {
+  function ashFits(L, S) {
     if (!L || L.known) return false;
+    if (L.script) { try { return !!(C() && C().fromDeck(S, L)); } catch (err) { return false; } }
     const c = db.get(L.id);
     const e = c && R().effectsOf(c).find((x) => x.index === Number(L.effectIndex));
     if (!e) return false;
@@ -1109,7 +1116,7 @@
     const P = chain[i + 1];
     if (P && P.owner !== 'opp' && !P.negated) {
       const pc = db.get(P.id);
-      if (pc && isAshName(pc.id)) { if (ashFits(L)) return pc.name; }
+      if (pc && isAshName(pc.id)) { if (ashFits(L, S)) return pc.name; }
       else if (pc) {
         const pe = R().effectsOf(pc).find((x) => x.index === Number(P.effectIndex));
         const cond = String((pe && pe.condition) || '');
@@ -1148,12 +1155,28 @@
         if ((same(by, VEILER) || same(by, IMPERM)) && locOf(S, L.uid)) { try { D().negate(S, L.uid, by); } catch (err) { /* nada */ } }
         return [];
       }
-      if (L.known) return resolveKnown(S, i, L);
-      return resolveRun(S, i, L);
+      // Tu Droll & Lock Bird encadenado encima ya se resolvió: su bloqueo vale para este eslabón
+      const pre = drollAbove(S, i);
+      if (L.known) return pre.concat(resolveKnown(S, i, L));
+      if (L.script) return pre.concat(C() ? C().resolveLink(S, i, L) : []);
+      return pre.concat(resolveRun(S, i, L));
     } catch (err) {
       if (typeof console !== 'undefined') console.error('YGO.ai.resolveLink falló', err);
       return [{ op: 'note', text: 'No se simula: ' + q(nameById(L.id)) + ' (error interno).' }];
     }
+  }
+
+  /** ¿Ya rige el bloqueo de tu Droll & Lock Bird este turno? */
+  const drollLocked = (S) => arr(D().tsOf(S).locks).some((l) => l && l.kind === 'noDeckAdd' && same(l.source || '', DROLL));
+  function drollLock(S, name) {
+    view(S, (vw) => R().addLock(vw, { kind: 'noDeckAdd', source: name, text: 'Este turno no se pueden añadir cartas del Mazo a la mano.' }));
+    return 'Por tu ' + q(name) + ', el rival no puede añadir más cartas del Mazo a la mano este turno.';
+  }
+  /** Tu Droll (no negado) encima de su eslabón i: en su turno se resolvió antes, así que el bloqueo ya vale → notas */
+  function drollAbove(S, i) {
+    if (S.turnState.mine !== false || drollLocked(S)) return [];
+    const P = arr(S.chain).find((x, j) => j > i && x && x.owner !== 'opp' && !x.ai && !x.negated && same(nameById(x.id), DROLL));
+    return P ? [{ op: 'note', text: drollLock(S, nameById(P.id)) }] : [];
   }
 
   function resolveRun(S, i, L) {
@@ -1418,10 +1441,7 @@
         if (!P || P.owner === 'opp' || P.ai || P.negated) continue;
         if (abandoned && !P.done) continue;
         const name = nameById(P.id);
-        if (same(name, DROLL) && S.turnState.mine === false) {
-          view(S, (vw) => R().addLock(vw, { kind: 'noDeckAdd', source: name, text: 'Este turno no se pueden añadir cartas del Mazo a la mano.' }));
-          logs.push({ kind: 'opp', text: 'Por tu ' + q(name) + ', el rival no puede añadir más cartas del Mazo a la mano este turno.' });
-        }
+        if (same(name, DROLL) && S.turnState.mine === false && !drollLocked(S)) logs.push({ kind: 'opp', text: drollLock(S, name) });
         if (same(name, VEILER) || same(name, IMPERM)) {
           for (const u of linkTargets(P)) {
             const l = locOf(S, u);

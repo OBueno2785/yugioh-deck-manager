@@ -536,7 +536,7 @@
     return list.find((d) => d && String(d.id) === String(x)) || null;
   }
   /** Prepara el lado del rival en un S recién repartido (tu mano, Mazo y Extra Deck ya están). Lanza un error si no se puede
-   * (sin tocar S). cfg = { rival: mazo | id, firstPref: 'me'|'rival'|'coin', seed?, pace?, askOnly?, responds?, rivalHand?: ids,
+   * (sin tocar S). cfg = { rival: mazo | id, firstPref: 'me'|'rival'|'coin', seed?, pace?, askOnly?, responds?, combos?, rivalHand?: ids,
    * rivalOrder?: ids (de arriba abajo), starters?: ids }. → { ok, first, coin, dropped, logs: [texto] } */
   function setup(S, cfg) {
     cfg = cfg || {};
@@ -592,6 +592,7 @@
     S.vs = {
       v: 1, seed, first, firstPref: pref, coin, pace: ['normal', 'fast', 'step'].includes(cfg.pace) ? cfg.pace : 'normal', paused: false,
       askOnly: cfg.askOnly !== false, responds: cfg.responds !== false, rival: { id: o.deckId, name: o.name },
+      combos: cfg.combos !== false, // repite los combos grabados de su mazo (js/combos.js)
       over: null, win: null, warned: {}, recorded: null,
     };
     tsOf(S);
@@ -810,6 +811,105 @@
     S.opp.field.push(e);
     sync(S);
     return e;
+  }
+  /** Pone una carta del rival en su campo sin revisar las reglas (los combos grabados de js/combos.js ya se jugaron así).
+   * opts: { zone (la preferida), faceDown, def, method (se Invoca: summonMethod), under (uid del monstruo del que queda como
+   * material), mats ([uid] de su campo que quedan debajo, Xyz), token: { id, token } (una ficha nueva, uid propio) }.
+   * Sin zona libre de ese tipo prueba otra que sirva (Zona Extra ↔ principal para las del Extra Deck); con un monstruo suyo ya
+   * en una Zona Extra, el nuevo va a una principal (cada jugador usa una sola).
+   * → { ok, why?, entry, zone, from: 'field'|'mat'|pila|'new', was: { zone, faceDown, def } | null, extra: [texto] (la Mágica de
+   *   Campo que reemplazó y va a su Cementerio) } */
+  function place(S, uid, opts) {
+    opts = opts || {};
+    const o = S && S.opp;
+    const fail = (why) => ({ ok: false, why, entry: null, zone: null, from: null, was: null });
+    if (!o || !Array.isArray(o.field)) return fail('Sin rival.');
+    const turn = turnOf(S);
+    let f = null;
+    let inst;
+    if (opts.token && opts.token.id) {
+      inst = { uid: 'r' + (++o.rseq).toString(36), id: Number(opts.token.id), faceDown: false, def: false, token: Object.assign({}, opts.token.token || {}) };
+    } else {
+      f = findRival(S, uid);
+      if (!f) return fail('No encuentro esa carta del rival.');
+      inst = f.inst;
+    }
+    const from = f ? f.where : 'new';
+    const take = () => {
+      if (!f) return [];
+      const cur = findRival(S, inst.uid);
+      if (!cur) return [];
+      cur.list.splice(cur.index, 1);
+      return cur.where === 'field' ? arr(cur.entry.mats) : [];
+    };
+    // Queda como material de otro monstruo (con los materiales que tenía)
+    if (opts.under) {
+      const hf = findRival(S, opts.under);
+      if (!hf || hf.where !== 'field' || hf.entry.uid === inst.uid) return fail('No encuentro el monstruo.');
+      const carried = take();
+      const host = findRival(S, opts.under).entry;
+      host.mats = arr(host.mats).concat([cleanInst(inst, true)], carried.map((m) => cleanInst(m, true)));
+      sync(S);
+      return { ok: true, entry: host, zone: host.zone, from, was: null };
+    }
+    const c = cardOf(inst);
+    const mon = !!(inst.token || (c && db.isMonster(c)));
+    const fieldSpell = !!(c && !db.isMonster(c) && c.type & T.FIELD);
+    const want = opts.zone && FIELD.includes(opts.zone) ? opts.zone : null;
+    const kindOf = (z) => (z === 'fz' ? 'fz' : ST.includes(z) ? 'st' : EMZ.includes(z) ? 'emz' : 'mz');
+    const was = f && f.where === 'field' ? { zone: f.entry.zone, faceDown: !!f.entry.faceDown, def: !!f.entry.def } : null;
+    // Los materiales Xyz dejan sus zonas antes de elegir la del monstruo nuevo
+    const under = [];
+    for (const m of arr(opts.mats)) {
+      const mf = findRival(S, m);
+      if (!mf || mf.where !== 'field' || m === inst.uid) continue;
+      mf.list.splice(mf.index, 1);
+      under.push(cleanInst(mf.inst, true), ...arr(mf.entry.mats).map((x) => cleanInst(x, true)));
+    }
+    let zone = null;
+    if (was && (!want || want === was.zone)) zone = was.zone;
+    else {
+      let kind = want ? kindOf(want) : fieldSpell ? 'fz' : mon ? 'mz' : 'st';
+      const extraOk = !!(c && db.isExtra(c));
+      // Ya tiene un monstruo en una Zona Extra (otro que este): la otra no es suya
+      const emzUsed = o.field.some((x) => x && EMZ.includes(x.zone) && x.uid !== inst.uid);
+      if (kind === 'emz' && emzUsed) kind = 'mz';
+      if (kind === 'fz') zone = 'fz';
+      else zone = freeZone(S, kind, want) || (kind === 'emz' ? freeZone(S, 'mz') : kind === 'mz' && extraOk && !emzUsed ? freeZone(S, 'emz') : null);
+    }
+    if (!zone) {
+      // Sin zona: los materiales Xyz vuelven a su Cementerio (ya no tienen zona)
+      under.forEach((m) => toGy(S, m));
+      return fail('No hay una zona libre.');
+    }
+    const extra = [];
+    if (zone === 'fz' && !(was && was.zone === 'fz')) {
+      const old = entryAt(S, 'fz');
+      if (old && old.uid !== inst.uid) { const r = leave(S, old.uid, 'gy'); if (r && r.text) extra.push(r.text); }
+    }
+    let e;
+    if (was) {
+      e = f.entry;
+      e.zone = zone;
+    } else {
+      const carried = take();
+      e = { uid: inst.uid, id: inst.id, faceDown: false, def: false, zone };
+      if (inst.token) e.token = Object.assign({}, inst.token);
+      if (inst.properSummon) e.properSummon = inst.properSummon;
+      if (carried.length) e.mats = carried.map((m) => cleanInst(m, true));
+      o.field.push(e);
+    }
+    e.faceDown = !!opts.faceDown;
+    e.def = !!(opts.def || opts.faceDown) && MON.includes(zone);
+    if (MON.includes(zone) && mon) {
+      e.monster = true;
+      delete e.asSpell;
+    } else if (ST.includes(zone) && mon) e.asSpell = true;
+    if (opts.method && MON.includes(zone)) { e.summonedTurn = turn; e.summonMethod = opts.method; }
+    if (e.faceDown && (!was || !was.faceDown)) e.setTurn = turn;
+    if (under.length) e.mats = arr(e.mats).concat(under);
+    sync(S);
+    return { ok: true, entry: e, zone, from, was, extra };
   }
   const statLine = (S, side, x) => { const s = stats(S, side, Object.assign({}, x, { faceDown: false })); return s.link ? 'ATK ' + s.atk + ' / LINK-' + ((cardOf(x) || {}).lv || 0) : 'ATK ' + s.atk + ' / DEF ' + s.def; };
   /** Voltea boca arriba una carta suya (batalla o efecto). → { ok, entry, text } */
@@ -1127,7 +1227,7 @@
     mirror, zoneLabel, isVs, isPvp, rand, shuffle,
     setup, tsOf, zonesOf, rivalView, withRival, findRival, entryAt, monsters, spellTraps, freeZone, isMonsterEntry,
     sync, publicSide, publicCard, isPublic, rivalName, moveText,
-    draw, summon, set, activatePlace, leave, flip, position, negate, moveRival,
+    draw, summon, set, activatePlace, leave, flip, position, negate, moveRival, place,
     stats, canAttack, targets, battle, applyBattle, damage, setLp, pay, result,
     record, statsVs,
   };
