@@ -5441,5 +5441,6 @@
     newDuel: (h, r, o) => newDuel(h, r, o), openSetup,
     select: (uid) => { selected = uid; render(); }, oppField: openOppField,
   };
-  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port };
+  // openCombos: la ventana "Combos para el CPU" (la abre la sección Combos al ir a grabar uno nuevo)
+  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port, openCombos };
 })();

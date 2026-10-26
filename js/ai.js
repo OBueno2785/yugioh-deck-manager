@@ -108,7 +108,7 @@
 
   /* ---------- Condiciones ("If ...:") ---------- */
   const SUMMON_TRIG = /^If this card is ((?:(?:Normal|Special|Tribute|Flip|Synchro|Xyz|Link)\s+(?:or\s+|and\/or\s+)?)*)Summoned( to (?:your |the )?center Main Monster Zone)?(?:\s*\(except during the Damage Step\))?$/i;
-  const GY_TRIG = /^If this card is sent to the (?:GY|Graveyard)$/i;
+  const GY_TRIG = /^If this card is sent to the (?:GY|Graveyard)(?: as (?:an? )?(Synchro|Xyz|Link|Fusion) Material)?$/i;
   /** Lee la condición → { k: 'always'|'main'|'in'|'noMon'|'noCards'|'oppMon'|'ctrl'|'summon'|'gy'|'never'|'unknown', ... } */
   function condKind(cond) {
     let s = String(cond || '').replace(/\s*\(Quick Effect\)/gi, '').trim().replace(/[.,:;\s]+$/, '');
@@ -118,12 +118,12 @@
     s = s.replace(/^Once per turn,\s*/i, '');
     let m = s.match(SUMMON_TRIG);
     if (m) return { k: 'summon', methods: (m[1].match(/Normal|Special|Tribute|Flip|Synchro|Xyz|Link/gi) || []).map((w) => w.toLowerCase()), center: !!m[2] };
-    if (GY_TRIG.test(s)) return { k: 'gy' };
+    if ((m = s.match(GY_TRIG))) return { k: 'gy', as: m[1] ? m[1].toLowerCase() : null };
     const parts = s.split(/,\s*(?=(?:if|during)\b)/i);
     const out = [];
     for (const p0 of parts) {
       const p = p0.trim();
-      if (/^During your Main Phase$/i.test(p)) out.push({ k: 'main' });
+      if (/^During (?:your|the) Main Phase$/i.test(p)) out.push({ k: 'main' });
       else if ((m = p.match(/^If this card is in your (hand|GY|Graveyard)$/i))) out.push({ k: 'in', where: /hand/i.test(m[1]) ? 'hand' : 'gy' });
       else if ((m = p.match(/^If you control no monsters( in your Main Monster Zone)?$/i))) out.push({ k: 'noMon', main: !!m[1] });
       else if ((m = p.match(/^If you control no (cards|face-up cards)$/i))) out.push({ k: 'noCards', faceUp: /face-up/i.test(m[1]) });
@@ -158,7 +158,7 @@
         return String(c.name).toLowerCase().includes(ck.name.toLowerCase());
       });
       case 'summon': return !!(trig && trig.type === 'summon' && methodFits(ck.methods, trig.method) && L.where === 'field' && !L.x.faceDown && (!ck.center || L.zone === 'mz2'));
-      case 'gy': return !!(trig && trig.type === 'gy' && L.where === 'gy');
+      case 'gy': return !!(trig && trig.type === 'gy' && L.where === 'gy' && (!ck.as || trig.method === ck.as));
       default: return false;
     }
   }
@@ -177,7 +177,10 @@
     const all = L.cost.concat(L.targets, L.actions);
     for (const x of all) {
       if (!x || x.verb === 'manual' || x.verb === 'procSummon') return 'manual';
-      if (!AI_VERBS.includes(x.verb)) return 'verb';
+      if (!AI_VERBS.includes(x.verb)) {
+        if (x.optional && L.actions.includes(x)) continue; // ("then you can reduce the Levels…" de Strelitzia: se salta)
+        return 'verb';
+      }
       if (x.condition) return 'condition';
     }
     if (L.actions.some((a) => a.verb === 'tribute' || a.verb === 'target')) return 'verb';
@@ -230,6 +233,11 @@
     return inf;
   }
   const sumTrig = (c, method) => infoOf(c).effs.some((x) => x.ok && x.ck.k === 'summon' && methodFits(x.ck.methods, method));
+  /** ¿Le sirve la Zona de Monstruo central? ("Summoned to the center Main Monster Zone", "while in the center…": Elfnote) */
+  const CENTER_RE = /\bthis card\b[^.]*\bcenter Main Monster Zone|\bcenter Main Monster Zone\b[^.]*\bthis card\b/i;
+  const wantsCenter = (c) => !!(c && isMon(c) && CENTER_RE.test(c.desc || ''));
+  /** Zona al Invocar c: la central si le sirve y está libre; si no, null (la primera libre, como siempre). */
+  const centerFor = (cx, c) => (wantsCenter(c) && !entryAt(cx.S, 'mz2') ? 'mz2' : null);
   const gyBenefit = (c) => !!(c && /is sent to the (?:GY|Graveyard)|If this card is in your (?:GY|Graveyard)/i.test(c.desc || ''));
   const nsAble = (c) => isMon(c) && !db.isExtra(c) && c.lv <= 4 && !(c.type & (T.RITUAL | T.TOKEN)) && !/cannot be Normal Summoned/i.test(c.desc || '');
 
@@ -248,7 +256,12 @@
     return v;
   }
   /** Valor de un monstruo en el campo (para Invocar desde el Extra Deck): ATK/100 + 30 con efecto al ser Invocado + 10 con efectos en el campo. */
-  const fieldValue = (c, atk, method) => (Math.max(0, atk == null ? Number(c.atk) || 0 : atk) / 100) + (sumTrig(c, method || 'special') ? 30 : 0) + (infoOf(c).fieldIgn ? 10 : 0);
+  const fieldValue = (c, atk, method) => (Math.max(0, atk == null ? baseAtk(c) : atk) / 100) + (sumTrig(c, method || 'special') ? 30 : 0) + (infoOf(c).fieldIgn ? 10 : 0);
+  /** ATK impreso; si es "?" y el texto la fija ("This card's original ATK becomes 3000"), esa. */
+  const baseAtk = (c) => { const a = Number(c.atk) || 0; if (a >= 0) return a; const m = /original ATK becomes (\d+)/i.exec(c.desc || ''); return m ? Number(m[1]) : 0; };
+  /** Valor de un material que ya está en el campo (para Invocar desde el Extra Deck). */
+  const matValue = (c, atk, method) => (Math.max(0, atk == null ? baseAtk(c) : atk) / 100) + (infoOf(c).fieldIgn ? 10 : 0)
+    - (infoOf(c).effs.some((x) => x.ok && x.ck.k === 'gy' && (!x.ck.as || x.ck.as === method)) ? 10 : 0);
 
   /* ---------- Candidatas de una acción ---------- */
   /** Sus cartas en un lugar (en sus propias palabras: "you" = el rival). */
@@ -360,6 +373,29 @@
     } catch (err) { v = null; }
     return !!(v && v.ok && !arr(v.warnings).length);
   }
+  /** ¿Conviene jugar esta carta antes de pagarla como costo? Un monstruo suyo boca arriba con un efecto de Ignición que todavía
+   * va a usar, o (en Principal 1) un monstruo de la mano que puede Invocarse solo y gratis. Así no manda «Elfnote Fortuna» al
+   * Cementerio para Invocar a «Elfnote Regina»: primero Fortuna se Invoca y usa su efecto, y después paga con ella. */
+  function betterPlayed(cx, x) {
+    if (!x || !x.mine || cx.saving) return false;
+    cx.saving = true; // (sin vueltas: mirar ese efecto no vuelve a mirar costos con esta regla)
+    try {
+      if (x.where === 'field' && isMonEntry(x.x) && !x.x.faceDown) {
+        return infoOf(x.card).effs.some((it) => it.ok && it.e.kind === 'ignition' && ((evalEff(cx, x.uid, it.e.index, null) || {}).score || 0) >= 10);
+      }
+      if (x.where === 'hand' && cx.t.phase === 'main1') return !!procOf(cx, x.x, 'hand');
+      return false;
+    } catch (err) { return false; } finally { cx.saving = false; }
+  }
+  /** Candidatas para un costo: sin las que conviene jugar primero; si la carta que se activa quiere la Zona central y está
+   * ocupada, primero la que está ahí (la libera: Regina manda a Fortuna del centro y se Invoca en su lugar). */
+  function costPool(cx, a, opts, L) {
+    const list = candidates(cx, a, opts).filter((x) => !betterPlayed(cx, x));
+    const own = L && L.where !== 'field' ? cardOf(L.x) : null;
+    if (!wantsCenter(own) || !entryAt(cx.S, 'mz2')) return { list, center: false };
+    return { list, center: true };
+  }
+  const centerFirst = (pool, sorted) => (pool.center ? sorted.filter((x) => x.zone === 'mz2').concat(sorted.filter((x) => x.zone !== 'mz2')) : sorted);
   /** ¿Puede Invocar de modo Especial esta carta suya con este efecto (sin avisos)? */
   const canSS = (cx, uid, c, e, extra) => summonCheck(cx, Object.assign({ uid, method: 'special', position: 'atk', materials: [], source: q(c.name) }, extra || {}));
   function costFeasible(cx, a, L, used) {
@@ -383,9 +419,9 @@
       }
       case 'position': return false;
       default: {
-        const list = candidates(cx, a, { self, noSelf: true, exclude: used });
-        if (list.length < n) return false;
-        sortFor(cx, list, a.verb === 'tribute' ? 'tribute' : 'cost').slice(0, n).forEach((x) => used.add(x.uid));
+        const pool = costPool(cx, a, { self, noSelf: true, exclude: used }, L);
+        if (pool.list.length < n) return false;
+        centerFirst(pool, sortFor(cx, pool.list, a.verb === 'tribute' ? 'tribute' : a.verb === 'send' ? 'send' : 'cost')).slice(0, n).forEach((x) => used.add(x.uid));
         return true;
       }
     }
@@ -589,7 +625,7 @@
       const c = cardOf(L.x);
       let note = '';
       for (const it of infoOf(c).effs) {
-        if (tr.type === 'summon' ? !(it.ck.k === 'summon' && methodFits(it.ck.methods, tr.method)) : it.ck.k !== 'gy') continue;
+        if (tr.type === 'summon' ? !(it.ck.k === 'summon' && methodFits(it.ck.methods, tr.method)) : it.ck.k !== 'gy' || (it.ck.as && it.ck.as !== tr.method)) continue;
         const trig = { type: tr.type, method: tr.method || null };
         const r = it.ok ? evalEff(cx, tr.uid, it.e.index, trig) : null;
         if (r) return withKey({ kind: 'activate', uid: tr.uid, effectIndex: it.e.index, trig, score: r.score });
@@ -643,7 +679,8 @@
       if (c.lv > 4) continue;
       const set = (Number(c.atk) || 0) < top && (Number(c.def) || 0) > (Number(c.atk) || 0);
       const sc = value(c, cx, x.uid) + (!set && sumTrig(c, 'normal') ? 30 : 0) + (infoOf(c).fieldIgn ? 10 : 0) + Math.max(0, Number(c.atk) || 0) / 100;
-      offer({ kind: 'summon', uid: x.uid, method: set ? 'set' : 'normal', materials: [], position: set ? 'set' : 'atk' }, sc);
+      const z = set ? null : centerFor(cx, c);
+      offer(Object.assign({ kind: 'summon', uid: x.uid, method: set ? 'set' : 'normal', materials: [], position: set ? 'set' : 'atk' }, z ? { zone: z } : {}), sc);
     }
     const lowBest = best;
     best = null;
@@ -666,27 +703,33 @@
     return lowBest ? lowBest.act : null;
   }
 
-  /** 2e: su forma propia de Invocarse de modo Especial (sin costos y con una condición que entiende). */
+  /** Su forma propia de Invocarse de modo Especial (sin costos y con una condición que entiende) → la jugada o null. */
+  function procOf(cx, x, where) {
+    const c = cardOf(x);
+    if (!c || !isMon(c) || isHT(c)) return null;
+    const pr = R().procedureOf(c);
+    if (!pr || pr.index == null || pr.costs || !arr(pr.from).includes(where)) return null;
+    const m = String(pr.text || '').match(/^(.*?),?\s*you can Special Summon this card\b(.*)$/i);
+    if (!m) return null;
+    if (/\bby\b|\bTribut|\bsend|\bbanish/i.test(m[2])) return null;
+    const head = m[1].replace(/^(?:Once per turn|You can only Special Summon[^.]*\.)\s*,?\s*/i, '').trim();
+    if (head && !condOk(cx, condKind(head), { x, where, zone: null }, null)) return null;
+    const act = { kind: 'summon', uid: x.uid, method: 'special', ownProcedure: true, effectIndex: pr.index, materials: [],
+      position: /in (?:face-up )?Defense Position/i.test(m[2]) ? 'def' : 'atk' };
+    if (pr.center) act.zone = 'mz2';
+    if (triedAct(cx.S, act) || !summonOk(cx, act)) return null;
+    return withKey(act);
+  }
+  /** 2e: su forma propia de Invocarse de modo Especial, de la mano o del Cementerio. */
   function procedureAct(cx) {
-    const S = cx.S;
     const list = arr(cx.o.hand).map((x) => ({ x, where: 'hand' })).concat(arr(cx.o.gy).map((x) => ({ x, where: 'gy' })));
     const seen = new Set();
     for (const { x, where } of list) {
       const c = cardOf(x);
-      if (!c || !isMon(c) || isHT(c) || seen.has(where + c.id)) continue;
+      if (!c || seen.has(where + c.id)) continue;
       seen.add(where + c.id);
-      const pr = R().procedureOf(c);
-      if (!pr || pr.index == null || pr.costs || !arr(pr.from).includes(where)) continue;
-      const m = String(pr.text || '').match(/^(.*?),?\s*you can Special Summon this card\b(.*)$/i);
-      if (!m) continue;
-      if (/\bby\b|\bTribut|\bsend|\bbanish/i.test(m[2])) continue;
-      const head = m[1].replace(/^(?:Once per turn|You can only Special Summon[^.]*\.)\s*,?\s*/i, '').trim();
-      if (head && !condOk(cx, condKind(head), { x, where, zone: null }, null)) continue;
-      const act = { kind: 'summon', uid: x.uid, method: 'special', ownProcedure: true, effectIndex: pr.index, materials: [],
-        position: /in (?:face-up )?Defense Position/i.test(m[2]) ? 'def' : 'atk' };
-      if (pr.center) act.zone = 'mz2';
-      if (triedAct(S, act) || !summonOk(cx, act)) continue;
-      return withKey(act);
+      const act = procOf(cx, x, where);
+      if (act) return act;
     }
     return null;
   }
@@ -699,7 +742,7 @@
     const mons = ownMonsters(S).filter((e) => !e.faceDown).map((e) => ({ e, c: cardOf(e), atk: atkOf(S, e) })).filter((m) => m.c);
     if (!mons.length) return null;
     // Como mucho 5 candidatos (los que menos valen)
-    const cand = mons.slice().sort((a, b) => fieldValue(a.c, a.atk) - fieldValue(b.c, b.atk) || byZone(a.e, b.e)).slice(0, 5);
+    const cand = mons.slice().sort((a, b) => matValue(a.c, a.atk) - matValue(b.c, b.atk) || byZone(a.e, b.e)).slice(0, 5);
     let best = null;
     const ids = uniqueById(arr(cx.o.extra).filter((x) => x && !x.extraFaceUp));
     for (const x of ids) {
@@ -728,14 +771,14 @@
           if (tuners !== 1 || sub.some((m) => m.c.type & (T.XYZ | T.LINK))) continue;
           if (sub.reduce((a, m) => a + (typeof m.e.level === 'number' ? m.e.level : m.c.lv), 0) !== c.lv) continue;
         }
-        const gain = gainBase - sub.reduce((a, m) => a + fieldValue(m.c, m.atk), 0);
+        const gain = gainBase - sub.reduce((a, m) => a + matValue(m.c, m.atk, method), 0);
         if (!(gain > 5) || (best && gain <= best.gain)) continue;
         if (cx.checks >= BUDGET) break;
         const materials = sub.map((m) => m.e.uid);
         let zones = [];
         try { zones = view(S, (vw) => R().legalZones(vw, x.uid, { vacating: materials, from: 'extra' })); } catch (err) { zones = []; }
         if (!zones.length) continue;
-        const zone = (method === 'link' && zones.find((z) => EMZ.includes(z))) || zones[0];
+        const zone = (method === 'link' && zones.find((z) => EMZ.includes(z))) || (wantsCenter(c) && zones.includes('mz2') ? 'mz2' : null) || zones[0];
         const act = { kind: 'summon', uid: x.uid, method, materials, zone, position: 'atk' };
         if (triedAct(S, act)) continue;
         if (!summonCheck(cx, { uid: x.uid, method, materials: materials.slice(), zone })) continue;
@@ -893,7 +936,7 @@
     const L = locOf(S, uid);
     const c = L && cardOf(L.x);
     if (!c) return;
-    const has = infoOf(c).effs.some((it) => (type === 'summon' ? it.ck.k === 'summon' && methodFits(it.ck.methods, method) : it.ck.k === 'gy'));
+    const has = infoOf(c).effs.some((it) => (type === 'summon' ? it.ck.k === 'summon' && methodFits(it.ck.methods, method) : it.ck.k === 'gy' && (!it.ck.as || it.ck.as === method)));
     if (!has) return;
     aiOf(S).triggers.push({ uid, id: c.id, type, method: method || null, turn: turnOf(S) });
   }
@@ -941,7 +984,7 @@
     const logs = [{ kind: 'opp', text: textOf(r, 'El rival Invoca ' + q(c.name) + '.') }];
     const ai = aiOf(S);
     if (['link', 'xyz', 'synchro'].includes(act.method)) ai.extraSummons++;
-    for (const m of req.materials) { const ml = locOf(S, m); if (ml && ml.where === 'gy') pushTrigger(S, m, 'gy'); }
+    for (const m of req.materials) { const ml = locOf(S, m); if (ml && ml.where === 'gy') pushTrigger(S, m, 'gy', act.method); } // (Regina: "as Synchro Material")
     const hidden = req.position === 'set';
     if (hidden) return { ok: true, logs, window: null };
     const method = act.method === 'tribute' ? 'tribute' : act.method;
@@ -1003,7 +1046,8 @@
         const host = a.host === 'this' ? L.x : ownMonsters(cx.S).find((m) => arr(m.mats).length >= n);
         uids = host ? arr(host.mats).slice(0, n).map((m) => m.uid) : [];
       } else {
-        const list = sortFor(cx, candidates(cx, a, { self, noSelf: true, exclude: used }), a.verb === 'tribute' ? 'tribute' : a.verb === 'send' ? 'send' : 'cost');
+        const pool = costPool(cx, a, { self, noSelf: true, exclude: used }, L);
+        const list = centerFirst(pool, sortFor(cx, pool.list, a.verb === 'tribute' ? 'tribute' : a.verb === 'send' ? 'send' : 'cost'));
         uids = list.slice(0, n).map((x) => x.uid);
       }
       if (a.verb !== 'payLP' && uids.length < n) return null;
@@ -1244,6 +1288,8 @@
   function doAction(cx, a, items, k) {
     const S = cx.S;
     const by = k.c.name;
+    // Una parte opcional que no sabe hacer ("then you can reduce the Levels…"): se salta, con una sola nota
+    if (a.optional && !AI_VERBS.includes(a.verb)) { k.skip(a); return { did: false, items: [] }; }
     const done = [];
     const ctxM = { self: k.L.uid, costCards: k.costCards, targetCards: k.targetCards };
     const pickNow = (purpose, filterFn) => {
@@ -1420,7 +1466,7 @@
       let lz = [];
       try { lz = view(cx.S, (vw) => [...R().linkedZones(vw)]).filter((z) => MZ.includes(z) && !entryAt(cx.S, z)); } catch (err) { lz = []; }
       if (lz.length) r.zone = lz[0]; else r.noZone = true;
-    }
+    } else if (r.position !== 'set' && centerFor(cx, c)) r.zone = 'mz2'; // (Regina: "Summoned to the center" → su efecto)
     return r;
   }
   function ssPos(cx, c, a) {

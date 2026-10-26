@@ -1,7 +1,7 @@
-/* Navegación entre Constructor, Prueba de mano y Campo (con #constructor, #mano, #campo). */
+/* Navegación entre Constructor, Prueba de mano, Campo y Combos (con #constructor, #mano, #campo, #combos). */
 (function () {
   const YGO = window.YGO;
-  const MODES = ['constructor', 'mano', 'campo'];
+  const MODES = ['constructor', 'mano', 'campo', 'combos'];
 
   function route(want) {
     const h = typeof want === 'string' ? want : location.hash.replace('#', '');
@@ -13,11 +13,15 @@
       a.classList.toggle('active', on);
       if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
+    // (en el móvil las pestañas se desplazan: la elegida queda a la vista)
+    const act = document.querySelector('.modes .mode.active');
+    if (act && act.parentElement.scrollWidth > act.parentElement.clientWidth) act.parentElement.scrollLeft = Math.max(0, act.offsetLeft - act.parentElement.offsetLeft - 8);
     document.getElementById('modal').hidden = true;
     document.body.classList.remove('detail-open');
     if (mode === 'constructor') YGO.builder.refresh();
     if (mode === 'mano') YGO.handtest.enter();
     if (mode === 'campo') YGO.field.enter();
+    if (mode === 'combos' && YGO.combolab) YGO.combolab.enter();
   }
 
   // Al cambiar de modo dentro del visor no siempre llega hashchange; se maneja el clic directamente

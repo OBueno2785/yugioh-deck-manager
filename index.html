@@ -18,6 +18,7 @@
       <a class="mode active" href="#constructor" aria-current="page">Constructor</a>
       <a class="mode" href="#mano">Prueba de mano</a>
       <a class="mode" href="#campo">Campo</a>
+      <a class="mode" href="#combos">Combos</a>
     </nav>
     <p class="db-info"><span id="db-count">0</span> cartas · banlist <span id="banlist-name">TCG</span><span id="online-badge" class="online-badge" hidden title="Conectado a YGOPRODeck: imágenes y cartas nuevas">YGOPRODeck</span></p>
   </header>
@@ -160,6 +161,22 @@
     </aside>
   </main>
 
+  <main class="combolab mode-pane" data-mode="combos" hidden>
+    <aside class="panel cl-side" aria-label="Combos grabados del mazo">
+      <div class="toolrow">
+        <label class="sr" for="cl-deck">Mazo</label>
+        <select id="cl-deck" class="deck-select"></select>
+      </div>
+      <p id="cl-sum" class="cl-sum"></p>
+      <ul id="cl-list" class="cl-list" aria-label="Combos"></ul>
+      <div class="cl-side-foot">
+        <button id="cl-rec" type="button" class="go">Grabar combo nuevo en el campo →</button>
+        <p class="hint">Cada combo es un turno que jugaste en Campo → Prueba. En VS, cuando el rival usa este mazo y su mano puede empezarlo, el CPU lo repite.</p>
+      </div>
+    </aside>
+    <section id="cl-view" class="cl-view" aria-label="Combo elegido"></section>
+  </main>
+
   <main class="fieldmode mode-pane" data-mode="campo" hidden>
     <section class="fd-main">
       <div class="toolrow">
@@ -268,6 +285,7 @@
 <script src="js/vendor/peerjs.min.js"></script>
 <script src="js/net.js"></script>
 <script src="js/pvp.js"></script>
+<script src="js/combolab.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
