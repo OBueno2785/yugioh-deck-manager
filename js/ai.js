@@ -846,6 +846,16 @@
       try { sa = C() && typeof C().nextAct === 'function' ? C().nextAct(S, ai) : null; } catch (err) { console.error('YGO.combos.nextAct falló', err); sa = null; }
       if (sa) return sa;
       const m1 = phase === 'main1';
+      // Ya hizo su combo grabado entero: no lo arruina con otras jugadas (p. ej. devolver al Extra Deck lo que dejó el
+      // combo para Invocar otra cosa); solo coloca Mágicas/Trampas y sigue
+      let full = false;
+      try { full = !!(C() && typeof C().finished === 'function' && C().finished(S)); } catch (err) { full = false; }
+      if (full) {
+        const a = setAct(cx);
+        if (a) return a;
+        if (m1) return cx.turn > 1 ? { kind: 'phase', to: 'battle', key: 'phase::battle' } : { kind: 'phase', to: 'end', key: 'phase::end' };
+        return { kind: 'phase', to: 'end', key: 'phase::end' };
+      }
       const steps = [
         () => triggerAct(cx),
         () => (m1 ? fieldSpellAct(cx) : null),

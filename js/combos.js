@@ -473,21 +473,75 @@
     for (const id of arr(want)) { const i = left.indexOf(Number(id)); if (i < 0) return false; left.splice(i, 1); }
     return true;
   }
-  function feasible(S, c) {
-    const o = S.opp;
-    return covers(ids(o.hand), c.hand) && covers(ids(o.deck), c.needs && c.needs.deck) && covers(ids(o.extra), c.needs && c.needs.extra);
+  /** Las cartas del combo cuyo primer movimiento es una búsqueda (un eslabón la añade del Mazo a la mano) → Set de refs */
+  function searchRefs(combo) {
+    const seen = new Set();
+    const out = new Set();
+    const see = (m, res) => {
+      if (!m || seen.has(m.r)) return;
+      seen.add(m.r);
+      if (res && m.from && m.from.a === 'deck' && m.to && m.to.a === 'hand' && !m.draw) out.add(m.r);
+    };
+    for (const st of arr(combo && combo.steps)) {
+      if (st.t === 'act') {
+        st.links.forEach((l) => seen.add(l.r));
+        st.pre.forEach((m) => see(m, false));
+        st.res.forEach((m) => see(m, true));
+      } else if (st.t === 'summon') {
+        seen.add(st.r);
+        arr(st.mats).concat(arr(st.extra)).forEach((m) => see(m, false));
+      } else arr(st.moves).forEach((m) => see(m, false));
+    }
+    return out;
   }
+  /** ¿Puede hacer el combo? Una carta que el combo busca del Mazo pero ya está en su mano también sirve: el combo usa esa
+   * copia y la búsqueda trae otra carta (ver substitute). → { subs: { ref: uid de la copia en su mano } } | null */
+  function planFor(S, c) {
+    const o = S.opp;
+    const hand = arr(o.hand).slice();
+    // Primero la mano que pide el combo (con qué empieza)
+    for (const id of arr(c.hand)) {
+      const i = hand.findIndex((x) => x && Number(x.id) === Number(id));
+      if (i < 0) return null;
+      hand.splice(i, 1);
+    }
+    if (!covers(ids(o.extra), c.needs && c.needs.extra)) return null;
+    const deck = ids(o.deck);
+    const want = arr(c.needs && c.needs.deck).map(Number);
+    const sr = searchRefs(c);
+    const subs = {};
+    for (const id of new Set(want)) {
+      const short = want.filter((x) => x === id).length - deck.filter((x) => x === id).length;
+      if (short <= 0) continue;
+      // Solo las búsquedas pueden usar la copia de la mano (lo que va del Mazo al campo o al Cementerio, no)
+      const refs = arr(c.refs).map((x, r) => r).filter((r) => sr.has(r) && c.refs[r] && c.refs[r].from === 'deck' && Number(c.refs[r].id) === id);
+      const copies = hand.filter((x) => x && Number(x.id) === id);
+      if (refs.length < short || copies.length < short) return null;
+      for (let k = 0; k < short; k++) {
+        subs[refs[k]] = copies[k].uid;
+        hand.splice(hand.indexOf(copies[k]), 1);
+      }
+    }
+    return { subs };
+  }
+  const feasible = (S, c) => !!planFor(S, c);
   /** Elige el combo de este turno (el de más pasos de los posibles) → guion | null */
   function start(S) {
     const o = S.opp;
     const mine = slot(o.deckId).filter((c) => c.enabled !== false && arr(c.steps).length);
-    const ok = mine.filter((c) => feasible(S, c)).sort((a, b) => b.steps.length - a.steps.length || (Number(b.created) || 0) - (Number(a.created) || 0));
+    const ok = mine.map((c) => ({ c, p: planFor(S, c) })).filter((x) => x.p)
+      .sort((a, b) => b.c.steps.length - a.c.steps.length || (Number(b.c.created) || 0) - (Number(a.c.created) || 0));
     if (!ok.length) return null;
-    const c = ok[0];
-    return { id: c.id, name: c.name, n: 0, total: c.steps.length, map: {}, done: false, cut: null, sumWin: null };
+    const { c, p } = ok[0];
+    return { id: c.id, name: c.name, n: 0, total: c.steps.length, map: Object.assign({}, p.subs), subs: Object.assign({}, p.subs), done: false, cut: null, sumWin: null };
   }
   /** El guion de este turno (S.opp.ai lo reinicia js/ai.js en cada turno). */
   const scriptOf = (S) => (S && S.opp && S.opp.ai && S.opp.ai.script) || null;
+  /** ¿Hizo este turno un combo entero (todos sus pasos, sin cortarse)? js/ai.js no lo arruina con otras jugadas. */
+  function finished(S) {
+    const sc = scriptOf(S);
+    return !!(sc && !sc.none && sc.done && sc.cut == null && !sc.sumWin && sc.n >= sc.total);
+  }
 
   /** La próxima jugada del guion para js/ai.js (en sus Fases Principales, con la cadena vacía): { kind: 'script', key } | null */
   function nextAct(S, ai) {
@@ -501,7 +555,7 @@
     if (sc.none || (sc.done && !sc.sumWin)) return null;
     const key = 'script:' + sc.id + ':' + sc.n + (sc.sumWin ? ':w' : '');
     // (js/ai.js marca en tried lo que no salió: el guion termina ahí y sigue la IA de siempre)
-    if (ai.tried && ai.tried[key]) { sc.done = true; sc.sumWin = null; return null; }
+    if (ai.tried && ai.tried[key]) { sc.done = true; sc.sumWin = null; if (sc.cut == null) sc.cut = sc.n; return null; }
     return { kind: 'script', key };
   }
 
@@ -594,6 +648,33 @@
     return 'El rival pone ' + name + ' boca arriba en ' + z + tail + '.';
   }
   const HOW_PRE = { gy: 'cost', ban: 'banish', hand: 'hand', deck: 'deck' };
+  /** La búsqueda (eslabón L) de la carta del combo (ref r) que ya estaba en su mano: otra carta de su Mazo que ese efecto
+   * pueda añadir y que el resto del combo no saque del Mazo después → uid | null (no hay: no añade nada) */
+  function substitute(S, sc, combo, L, r) {
+    const E = YGO.effects;
+    const card = db.get(L && L.id);
+    const want = db.get(combo.refs[r] && combo.refs[r].id);
+    if (!E || !card || !want) return null;
+    let plan = null;
+    try { plan = E.parse(card, L.effectIndex); } catch (err) { plan = null; }
+    if (!plan) return null;
+    const acts = arr(plan.actions).concat(...arr(plan.options).map((o) => arr(o && o.actions)));
+    const fits = (c, a) => { try { return E.match(c, a.filter, {}); } catch (err) { return false; } };
+    // (la acción de añadir del Mazo con la que se grabó: la que puede traer esa carta)
+    const a = acts.find((x) => x && x.verb === 'add' && arr(x.from).includes('deck') && fits(want, x));
+    if (!a) return null;
+    const used = new Set(Object.values(sc.map));
+    const need = {};
+    arr(combo.refs).forEach((x, k) => { if (x && x.from === 'deck' && !sc.map[k]) need[x.id] = (need[x.id] || 0) + 1; });
+    const free = arr(S.opp.deck).filter((y) => y && !used.has(y.uid));
+    const left = {};
+    free.forEach((y) => { left[y.id] = (left[y.id] || 0) + 1; });
+    const ok = free.filter((y) => (left[y.id] || 0) > (need[y.id] || 0) && fits(db.get(y.id), a));
+    if (!ok.length) return null;
+    // Mejor una que no tenga ya en la mano
+    const inHand = new Set(ids(S.opp.hand));
+    return (ok.find((y) => !inHand.has(Number(y.id))) || ok[0]).uid;
+  }
   /** Hace los movimientos en orden: a las pilas, después arriba de las zonas, después los materiales.
    * ctx = { pre (costos), mat (materiales: 'material' | 'tribute'), quiet: Set de refs que no se anuncian al ponerse en el campo,
    *   ops: [] (tu carta que estaba en su campo y vuelve a ti) }
@@ -616,6 +697,15 @@
         sc.map[m.r] = res.entry.uid;
         out.logs.push(placeText(S, null, res));
         if (!res.entry.faceDown) out.summoned.push(q(nameOfEntry(res.entry)));
+        continue;
+      }
+      // La búsqueda de una carta que ya tenía en la mano: el combo usa esa copia y el efecto añade otra carta (si hay)
+      if (ctx.link && sc.subs && sc.subs[m.r] && m.from.a === 'deck' && to.a === 'hand' && !m.draw) {
+        delete sc.subs[m.r];
+        const sub = substitute(S, sc, combo, ctx.link, m.r);
+        if (!sub) continue;
+        const r = D().moveRival(S, sub, 'hand', { how: '', by: '' });
+        if (r && r.text) out.logs.push(r.text);
         continue;
       }
       let hit = locate(S, sc, combo, m.r, m.from.a, { draw: m.from.a === 'deck' && m.draw });
@@ -701,6 +791,7 @@
       if (Array.isArray(S.chain)) S.chain.length = Math.min(S.chain.length, chain0);
       sc.done = true;
       sc.sumWin = null;
+      if (sc.cut == null) sc.cut = Math.max(0, sc.n - 1);
       return { ok: true, logs: [cutLog(Object.assign({}, sc, { n: Math.max(0, sc.n - 1) }), '')], window: null };
     }
   }
@@ -736,7 +827,7 @@
       const pm = st.pre.find((m) => m.r === l.r);
       const area = pm ? pm.from.a : l.from;
       const hit = locate(S, sc, combo, l.r, area);
-      if (!hit) { sc.done = true; return { ok: true, logs: [cutLog(Object.assign({}, sc, { n }), 'falta una carta')], window: null }; }
+      if (!hit) { sc.done = true; sc.cut = n; return { ok: true, logs: [cutLog(Object.assign({}, sc, { n }), 'falta una carta')], window: null }; }
       sc.map[l.r] = hit.uid;
       links.push({ l, uid: hit.uid, wasSet: hit.f.where === 'field' && !!hit.f.entry.faceDown });
     }
@@ -774,7 +865,7 @@
   function runSummon(S, sc, combo, st) {
     const logs = [];
     const say = (t) => { if (t) logs.push({ kind: 'opp', text: t }); };
-    const cut = (why) => { sc.done = true; logs.push(cutLog(Object.assign({}, sc, { n: sc.n - 1 }), why)); return { ok: true, logs, window: null }; };
+    const cut = (why) => { sc.done = true; sc.cut = sc.n - 1; logs.push(cutLog(Object.assign({}, sc, { n: sc.n - 1 }), why)); return { ok: true, logs, window: null }; };
     const hit = locate(S, sc, combo, st.r, st.from);
     if (!hit) return cut('falta una carta');
     sc.map[st.r] = hit.uid;
@@ -863,7 +954,7 @@
     const ops = [];
     const by = nameById(L.id);
     const cl = 'CL' + (i + 1) + ' ' + q(by) + ': ';
-    const r = applyMoves(S, sc, combo, resOf(S, L, st), { ops });
+    const r = applyMoves(S, sc, combo, resOf(S, L, st), { ops, link: L });
     const notes = r.logs.map((t) => ({ op: 'note', text: cl + lowerFirst(t) }));
     if (r.summoned.length) sc.sumWin = 'El rival Invocó ' + listEs(r.summoned) + '. Puedes responder.';
     return notes.concat(ops);
@@ -881,7 +972,7 @@
 
   YGO.combos = {
     KEY, CAP, list, count, get, add, update, remove, exportFor, importFor, seedPresets, build, describe, handNames, finalNames, zoneEs,
-    nextAct, run, resolveLink, fromDeck, feasible: (S, c) => (S && S.opp && c ? feasible(S, c) : false),
+    nextAct, run, resolveLink, fromDeck, finished, feasible: (S, c) => (S && S.opp && c ? feasible(S, c) : false),
     // Para las pruebas: lo que hay guardado (sin copiar) y empezar de cero
     _reset: () => { cache = {}; save(); },
   };
