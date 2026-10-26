@@ -1,6 +1,6 @@
 /* Combos: revisar los combos grabados de cada mazo (los que el CPU repite en VS). Lista, pasos con sus cartas, campo final,
  * con qué mano empieza y qué tan seguido la abre, si el mazo de ahora tiene todo lo que usa; usarlo o no, renombrar, borrar,
- * practicarlo en el campo con su mano. Grabar sigue en Campo → Prueba («Grabar combo»). Expone window.YGO.combolab. */
+ * verlo jugarse solo en el campo (Reproducir) o practicarlo con su mano. Grabar sigue en Campo → Prueba («Grabar combo»). Expone window.YGO.combolab. */
 (function () {
   const YGO = (window.YGO = window.YGO || {});
   const { db, view, store } = YGO;
@@ -153,7 +153,8 @@
     const nm = esc(q(c.name));
     return '<header class="cl-head"><div><h2>' + esc(c.name) + '</h2><p class="hint">' + plural(steps.length, 'paso', 'pasos')
       + (c.second ? ' · grabado yendo segundo' : ' · grabado yendo primero') + (c.created ? ' · ' + esc(dateEs(c.created)) : '') + '</p></div>'
-      + '<div class="cl-actions"><button type="button" class="go" data-cl-practice>Practicar en el campo →</button>'
+      + '<div class="cl-actions"><button type="button" class="primary" data-cl-play>▶ Reproducir en el campo</button>'
+      + '<button type="button" class="go" data-cl-practice>Practicar con su mano →</button>'
       + '<button type="button" data-cl-ren aria-label="Renombrar ' + nm + '">Renombrar</button>'
       + '<button type="button" class="ghost-danger" data-cl-del aria-label="Borrar ' + nm + '">Borrar</button></div></header>'
       + '<label class="switch cl-use"><input type="checkbox" data-cl-on' + (c.enabled !== false ? ' checked' : '') + '><span>El CPU usa este combo en VS (con ' + esc(q(d.name)) + ' como mazo rival)</span></label>'
@@ -221,6 +222,13 @@
     if (YGO.field.load(d, hand, rest, { second: !!c.second }) === false) return;
     YGO.go('campo');
   }
+  /** Al campo (Prueba) a ver el combo jugarse solo, paso a paso (YGO.field.replay). */
+  function replay() {
+    const c = current();
+    if (!c || !YGO.field || typeof YGO.field.replay !== 'function') return;
+    if (YGO.field.replay(d, c) === false) return;
+    YGO.go('campo');
+  }
   function record() {
     if (!YGO.field) return;
     if (YGO.field.load(d, null, null, {}) === false) return;
@@ -247,12 +255,13 @@
       if (again && !(window.matchMedia && window.matchMedia('(max-width: 899px)').matches)) again.focus();
     });
     $('#cl-view').addEventListener('click', (e) => {
-      const t = e.target.closest('[data-cl-card],[data-cl-ren],[data-cl-del],[data-cl-practice],[data-cl-rec]');
+      const t = e.target.closest('[data-cl-card],[data-cl-ren],[data-cl-del],[data-cl-practice],[data-cl-play],[data-cl-rec]');
       if (!t) return;
       if (t.dataset.clCard) showCard(Number(t.dataset.clCard));
       else if (t.hasAttribute('data-cl-ren')) rename();
       else if (t.hasAttribute('data-cl-del')) remove();
       else if (t.hasAttribute('data-cl-practice')) practice();
+      else if (t.hasAttribute('data-cl-play')) replay();
       else if (t.hasAttribute('data-cl-rec')) record();
     });
     $('#cl-view').addEventListener('change', (e) => {

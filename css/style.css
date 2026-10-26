@@ -1448,8 +1448,8 @@ button.rec-btn.rec-on::before { content: ""; display: inline-block; width: 8px; 
 .cb-btns button { padding: 5px 9px; font-size: 13px; }
 @media (max-width: 599px) {
   .cb-row { grid-template-columns: 1fr; }
-  .cb-btns { grid-column: 1; grid-row: auto; justify-content: flex-start; }
-  .cb-btns button { flex: 1 1 auto; min-height: 36px; }
+  .cb-btns { grid-column: 1; grid-row: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cb-btns button { min-height: 36px; }
 }
 .cb-steps { margin: 8px 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; }
 .cb-steps li { line-height: 1.35; }
@@ -1522,4 +1522,19 @@ button.rec-btn.rec-on::before { content: ""; display: inline-block; width: 8px; 
   .cl-tile { width: 54px; }
   .cl-tile.sm { width: 36px; }
   .cl-facts { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Reproducir un combo en el campo (Prueba): la barra de arriba (#fd-vs) con el paso, su avance y la velocidad */
+.vs-in.play { border-left-color: var(--ok); background: linear-gradient(90deg, rgba(63, 196, 138, .13), transparent 75%); }
+.vs-in.play.done { border-left-color: var(--accent); background: linear-gradient(90deg, rgba(226, 178, 74, .12), transparent 75%); }
+.rp-speed select { padding: 4px 6px; font-size: 13px; }
+.rp-prog { flex-basis: 100%; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.rp-prog span { display: block; height: 100%; background: var(--ok); transition: width .3s ease-out; }
+.vs-in.play.done .rp-prog span { background: var(--accent); }
+/* Lo que movió el último paso */
+.slot-card.rp-hot .card { box-shadow: 0 0 0 2px var(--ok), 0 0 14px rgba(63, 196, 138, .55); animation: rp-hot 1.1s ease-out; }
+@keyframes rp-hot { from { box-shadow: 0 0 0 3px var(--ok), 0 0 26px rgba(63, 196, 138, .9); } }
+@media (prefers-reduced-motion: reduce) {
+  .slot-card.rp-hot .card { animation: none; }
+  .rp-prog span { transition: none; }
 }

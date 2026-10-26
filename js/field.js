@@ -82,6 +82,10 @@
   // empieza: histBase + history.length al empezar), duelId }. Las fotos de history desde start y S son la grabación.
   let rec = null;
   const REC_CAP = 1500; // fotos que guarda history mientras graba (sin grabar, 150)
+  // Reproducir un combo grabado en tu campo (ver "Reproducir un combo" más abajo): { combo, deckId, duelId, n (pasos hechos),
+  // marks (histBase + history.length antes de cada paso: deshacer vuelve pasos), map ({ ref: uid }), paused, end, why, hot }
+  let play = null;
+  let playTimer = null;
 
   const decks = () => window.YGO.builder.decks();
   const blank = () => {
@@ -3398,7 +3402,8 @@
     const c = cardOf(inst);
     const p = pending && pending.kind === 'summon' ? pending : null;
     const cls = [inst.uid === selected ? 'sel' : '', inst.def ? 'is-def' : '', inst.faceDown && !reveal ? 'is-down' : '',
-      p && p.picks.includes(inst.uid) ? 'pick' : '', p && p.method !== 'pendulum' && p.uid === inst.uid ? 'summoning' : ''].join(' ');
+      p && p.picks.includes(inst.uid) ? 'pick' : '', p && p.method !== 'pendulum' && p.uid === inst.uid ? 'summoning' : '',
+      play && play.hot.includes(inst.uid) ? 'rp-hot' : ''].join(' ');
     const attrs = 'data-uid="' + inst.uid + '" draggable="true" tabindex="0"';
     // ATK cambiado por el rival (Multiplying Kuriboh!): la miniatura muestra el ATK de ahora
     const html = inst.token ? tokenTile(c, attrs) : view.tile(c, Object.assign({ attrs }, atkNow(inst) ? { atk: inst.atkSet.atk } : {}));
@@ -3555,6 +3560,8 @@
       rec = null;
       setTimeout(() => toast('Grabación cancelada', 'warn'), 0);
     }
+    if (play && (S.duelId !== play.duelId || isVs())) stopPlay();
+    if (play) syncPlay();
     // VS: zonas del rival al día y su Zona Extra bloqueada en tu marco (YGO.duel.sync)
     const vs = isVs();
     if (vs) duelCall('sync', [S]);
@@ -3626,7 +3633,8 @@
       }
     }
     const bar = $('#fd-vs');
-    if (bar && !vs) { bar.hidden = true; bar.innerHTML = ''; } else if (bar) bar.hidden = false;
+    if (bar && !vs && play) renderPlayBar();
+    else if (bar && !vs) { bar.hidden = true; bar.innerHTML = ''; } else if (bar) bar.hidden = false;
   }
 
   function renderTurn() {
@@ -4815,6 +4823,7 @@
       const nm = esc(q(c.name));
       return '<li class="cb-row"><label class="switch"><input type="checkbox" data-cb-on="' + esc(c.id) + '"' + (c.enabled !== false ? ' checked' : '')
         + ' aria-label="El CPU usa ' + nm + '"><span class="cb-name">' + esc(c.name) + '</span></label><span class="cb-meta">' + esc(comboMeta(c)) + '</span><span class="cb-btns">'
+        + '<button type="button" class="go" data-cb-play="' + esc(c.id) + '" aria-label="Reproducir ' + nm + ' en el campo">Reproducir</button>'
         + '<button type="button" data-cb-view="' + esc(c.id) + '" aria-label="Ver los pasos de ' + nm + '">Ver pasos</button>'
         + '<button type="button" data-cb-ren="' + esc(c.id) + '" aria-label="Renombrar ' + nm + '">Renombrar</button>'
         + '<button type="button" class="danger" data-cb-del="' + esc(c.id) + '" aria-label="Borrar ' + nm + '">Borrar</button></span></li>';
@@ -4837,8 +4846,10 @@
     const byId = (x) => list.find((c) => c.id === x) || null;
     $$('[data-cb-view]', root).forEach((el) => el.addEventListener('click', () => {
       const c = byId(el.dataset.cbView);
-      if (c) openDialog(c.name, '<p class="hint">' + esc(comboMeta(c)) + '</p>' + stepsHtml(c), [{ label: 'Volver', kind: 'primary', action: openCombos }], openCombos);
+      if (c) openDialog(c.name, '<p class="hint">' + esc(comboMeta(c)) + '</p>' + stepsHtml(c), [{ label: 'Volver', action: openCombos },
+        { label: 'Reproducir en el campo', kind: 'primary', action: () => playFromField(c) }], openCombos);
     }));
+    $$('[data-cb-play]', root).forEach((el) => el.addEventListener('click', () => { const c = byId(el.dataset.cbPlay); if (c) { closeModal(); playFromField(c); } }));
     $$('[data-cb-ren]', root).forEach((el) => el.addEventListener('click', () => {
       const c = byId(el.dataset.cbRen);
       if (!c) return;
@@ -4856,6 +4867,278 @@
         { label: 'Borrar', kind: 'danger', action: () => { comboCall('remove', [c.id]); toast('Combo borrado', 'ok'); openCombos(); } },
       ], openCombos);
     }));
+  }
+  /* ---------- Reproducir un combo ----------
+   * Pedido de Oscar (2026-10-26): ver un combo grabado jugarse solo en tu campo. Empieza un duelo de Prueba con la mano del
+   * combo (y lo que falta para 5, o 6 si se grabó yendo segundo, del Mazo al azar: cartas que el combo no saca del Mazo) y
+   * cada paso mueve tus cartas a donde quedaron en la grabación: es la grabación otra vez, sin reglas ni rival de handtraps.
+   * La barra de arriba dice qué hace cada paso; Lento / Normal / Rápido / Paso a paso (pref replaySpeed). Cada paso toma una
+   * foto: «Anterior» o Deshacer vuelven un paso. Tocar el tablero, la mano o el panel lo pausa; al terminar, el campo queda
+   * para seguir a mano. */
+  const PLAY_MS = { slow: 2600, normal: 1500, fast: 650, step: 0 };
+  const PLAY_SPEEDS = [['slow', 'Lento'], ['normal', 'Normal'], ['fast', 'Rápido'], ['step', 'Paso a paso']];
+  const playSpeed = () => (Object.prototype.hasOwnProperty.call(PLAY_MS, prefs.replaySpeed) ? prefs.replaySpeed : 'normal');
+  const histPos = () => histBase + history.length;
+  /** Empieza a reproducir combo (de deckObj) en el campo. → false si no se pudo */
+  function replay(deckObj, combo) {
+    if (!deckObj || !combo || !arr(combo.steps).length || !combosReady()) return false;
+    const rest = arr(deckObj.main).map(Number);
+    const hand = [];
+    const take = (id) => { const i = rest.indexOf(Number(id)); if (i >= 0) hand.push(rest.splice(i, 1)[0]); };
+    arr(combo.hand).forEach(take);
+    const need = new Set(arr(combo.needs && combo.needs.deck).map(Number));
+    arr(combo.refs).forEach((x) => { if (x && x.from === 'draw') need.add(Number(x.id)); });
+    const n = combo.second ? 6 : 5;
+    const free = game.shuffle(rest.filter((id) => !need.has(id)));
+    while (hand.length < n && free.length) take(free.shift());
+    while (hand.length < n && rest.length) hand.push(rest.splice(Math.floor(Math.random() * rest.length), 1)[0]);
+    stopPlay();
+    if (load(deckObj, hand, rest, { second: !!combo.second, bot: { enabled: false } }) === false) return false;
+    if (isVs()) return false;
+    // El combo empieza en la Fase Principal 1
+    if (S.turnState.phase !== 'main1') {
+      run('setPhase', [S, 'main1'], () => { S.turnState.phase = 'main1'; });
+      ensureState();
+      pushLog({ kind: 'phase', text: 'Fase: ' + phaseName(S.turnState.phase) });
+    }
+    pushLog({ kind: 'auto', text: 'Reproduce el combo ' + q(combo.name) + ' (' + combo.steps.length + (combo.steps.length === 1 ? ' paso)' : ' pasos)') });
+    S.setupLog = S.log.length;
+    play = { combo: JSON.parse(JSON.stringify(combo)), deckId: deckObj.id, duelId: S.duelId, n: 0, marks: [], map: {}, paused: false, end: false, why: '', hot: [] };
+    render();
+    schedulePlay();
+    // En el teléfono, la barra arriba y el tablero a la vista
+    if (window.matchMedia && window.matchMedia('(max-width: 899px)').matches) setTimeout(() => { const bar = $('#fd-vs'); if (bar && !bar.hidden) bar.scrollIntoView({ block: 'start' }); }, 30);
+    return true;
+  }
+  /** Desde la ventana de combos del campo (el mazo del campo): si hay jugadas, pregunta antes. */
+  function playFromField(c) {
+    const go = () => { replay(d, c); };
+    confirmRestart(go);
+  }
+  function stopPlay() {
+    clearTimeout(playTimer);
+    playTimer = null;
+    play = null;
+  }
+  function schedulePlay() {
+    clearTimeout(playTimer);
+    playTimer = null;
+    const ms = PLAY_MS[playSpeed()];
+    if (!play || play.paused || play.end || !ms) return;
+    playTimer = setTimeout(tickPlay, ms);
+  }
+  function tickPlay() {
+    playTimer = null;
+    if (!play || play.paused || play.end) return;
+    // Espera en otra pestaña, con una ventana abierta o con una jugada tuya a medias
+    if (document.body.dataset.mode !== 'campo' || !$('#modal').hidden || pending || autoBusy) { schedulePlay(); return; }
+    stepPlay();
+    schedulePlay();
+  }
+  /** Deshacer (o «Anterior») vuelve pasos: cuenta los que siguen hechos según las fotos. */
+  function syncPlay() {
+    while (play.marks.length && histPos() <= play.marks[play.marks.length - 1]) {
+      play.marks.pop();
+      play.n = Math.max(0, play.n - 1);
+      play.end = false;
+      play.why = '';
+      play.hot = [];
+    }
+  }
+  const refLabel = (c, r) => { const x = c.refs[r]; return q(x ? (x.tok ? x.tok.name : nameById(x.id)) : '?'); };
+  /** La carta de la grabación (ref r) en tu duelo: la misma de antes, o una copia en el lugar de donde salió. */
+  function playUid(c, r) {
+    const known = play.map[r];
+    if (known && locate(known)) return known;
+    const x = c.refs[r];
+    if (!x) return null;
+    const used = new Set(Object.keys(play.map).map((k) => play.map[k]));
+    const pick = (list) => { const e = list.find((y) => y && !y.token && Number(y.id) === Number(x.id) && !used.has(y.uid)); return e ? e.uid : null; };
+    let uid = null;
+    if (x.from === 'hand') uid = pick(S.hand) || pick(S.deck);
+    else if (x.from === 'deck') uid = pick(S.deck) || pick(S.hand);
+    else if (x.from === 'draw') uid = pick(S.deck) || (S.deck[0] && !used.has(S.deck[0].uid) ? S.deck[0].uid : null);
+    else if (x.from === 'extra') uid = pick(S.extra);
+    else uid = pick(S.hand) || pick(S.deck) || pick(S.extra);
+    if (uid) play.map[r] = uid;
+    return uid;
+  }
+  /** Mueve una carta a donde quedó en la grabación (to: { a, z, fd, def, host, top, bottom, fu }). → true si pudo */
+  function playPut(uid, to, sum) {
+    const loc = locate(uid);
+    if (!loc) return false;
+    const top = loc.area === 'field' && loc.index === 0;
+    const turn = S.turnState.turn;
+    if (to.a === 'field') {
+      if (!S.zones[to.z]) return false;
+      const stay = top && loc.zone === to.z;
+      if (!stay) {
+        // Un monstruo que cambia de zona se lleva sus materiales; lo que haya en la zona queda debajo hasta que se mueva
+        const stack = top ? loc.list.splice(0) : loc.list.splice(loc.index, 1);
+        if (!top) resetCard(stack[0]);
+        S.zones[to.z] = stack.concat(S.zones[to.z]);
+      }
+      const card = S.zones[to.z][0];
+      const entering = !top;
+      card.faceDown = !!to.fd;
+      card.def = !!to.def;
+      const mon = isMonsterZone(to.z) && (!!card.token || db.isMonster(cardOf(card)));
+      if (sum) {
+        card.summonMethod = sum;
+        card.summonedTurn = turn;
+        if (sum === 'normal' || sum === 'tribute') S.turnState.normalSummons = (Number(S.turnState.normalSummons) || 0) + 1;
+      } else if (entering && mon && !to.fd) { card.summonMethod = 'special'; card.summonedTurn = turn; }
+      else if (entering && to.fd) card.setTurn = turn;
+      return true;
+    }
+    if (to.a === 'mat') {
+      const host = play.map[to.host];
+      const hl = host ? locate(host) : null;
+      if (!hl || hl.area !== 'field' || hl.index !== 0 || host === uid) return false;
+      const [card] = loc.list.splice(loc.index, 1);
+      S.zones[hl.zone].push(resetCard(card));
+      return true;
+    }
+    const [card] = loc.list.splice(loc.index, 1);
+    if (to.a === 'gone' || card.token) return true; // (una ficha que deja el campo desaparece)
+    resetCard(card);
+    if (to.a === 'hand') S.hand.push(forget(card));
+    else if (to.a === 'deck') {
+      forget(card);
+      if (to.bottom) S.deck.push(card);
+      else if (to.top) S.deck.unshift(card);
+      else S.deck.splice(Math.floor(Math.random() * (S.deck.length + 1)), 0, card);
+    } else if (to.a === 'extra') { if (to.fu) card.extraFaceUp = true; else forget(card); S.extra.push(card); }
+    else if (to.a === 'ban') { if (to.fd) card.faceDown = true; S.ban.push(card); }
+    else S.gy.push(card);
+    return true;
+  }
+  /** Las jugadas de un paso, en orden: primero lo que va a las pilas, después al campo y al final los materiales (la misma
+   * carta, en el orden en que se grabó). */
+  function playOrder(moves) {
+    const ph = (m) => (m.to.a === 'mat' ? 2 : m.to.a === 'field' ? 1 : 0);
+    return arr(moves).filter((m) => m && m.to).map((m, i) => ({ m, i }))
+      .sort((x, y) => (x.m.r === y.m.r ? x.i - y.i : ph(x.m) - ph(y.m) || x.i - y.i)).map((x) => x.m);
+  }
+  /** Hace un paso. → { hot: [uid], sel, why } (why: lo que falta, si no se pudo) */
+  function applyPlayStep(c, st) {
+    const hot = [];
+    let sel = null;
+    let lists;
+    if (st.t === 'act') {
+      arr(st.links).forEach((l) => { const u = playUid(c, l.r); if (u) { hot.push(u); if (!sel) sel = u; } });
+      lists = [playOrder(st.pre), playOrder(st.res)];
+    } else if (st.t === 'summon') {
+      const host = { r: st.r, from: { a: st.from || 'hand' }, to: Object.assign({ a: 'field' }, st.to), sum: st.method };
+      lists = [playOrder(arr(st.mats).concat([host], arr(st.extra)))];
+    } else lists = [playOrder(st.moves)];
+    for (const list of lists) {
+      for (const m of list) {
+        if (m.from && m.from.a === 'new') {
+          // Ficha nueva
+          const x = c.refs[m.r];
+          if (!x || !x.tok || m.to.a !== 'field' || !S.zones[m.to.z]) continue;
+          const inst = game.instance(x.tok.id);
+          const t = x.tok.token && x.tok.token.name ? x.tok.token : { name: x.tok.name, atk: x.tok.atk, def: x.tok.def, level: x.tok.lv, attribute: x.tok.attr, race: x.tok.race };
+          inst.token = Object.assign({}, t);
+          S.hand.push(inst);
+          play.map[m.r] = inst.uid;
+          playPut(inst.uid, m.to, null);
+          hot.push(inst.uid);
+          continue;
+        }
+        const uid = playUid(c, m.r);
+        const x = c.refs[m.r] || {};
+        if (!uid) {
+          const where = { deck: 'en el Mazo', draw: 'en el Mazo', extra: 'en el Extra Deck', hand: 'en la mano' }[x.from] || 'en tu duelo';
+          return { hot, sel, why: 'falta ' + refLabel(c, m.r) + ' ' + where + '.' };
+        }
+        if (!playPut(uid, m.to, m.sum || null)) return { hot, sel, why: 'no se pudo mover ' + refLabel(c, m.r) + '.' };
+        if (m.to.a === 'field') { hot.push(uid); if (!sel || st.t === 'summon' && m.r === st.r) sel = uid; }
+      }
+    }
+    if (st.t === 'summon' && play.map[st.r]) sel = play.map[st.r];
+    return { hot, sel, why: '' };
+  }
+  function stepPlay() {
+    if (!play || play.end) return;
+    const c = play.combo;
+    const st = c.steps[play.n];
+    if (!st) { play.end = true; render(); return; }
+    const mark = histPos();
+    snapshot();
+    play.marks.push(mark);
+    const r = applyPlayStep(c, st);
+    if (r.why) {
+      // El paso queda sin hacer: vuelve a como estaba y se detiene
+      S = JSON.parse(history.pop());
+      play.marks.pop();
+      play.end = true;
+      play.why = r.why;
+      play.hot = [];
+      pushLog({ kind: 'auto', text: 'El combo se detiene en el paso ' + (play.n + 1) + ' de ' + c.steps.length + ': ' + r.why });
+      render();
+      return;
+    }
+    play.n++;
+    play.hot = r.hot;
+    // (la carta del paso queda elegida y su texto en el panel; en el teléfono no: la hoja taparía el tablero)
+    if (r.sel && !(window.matchMedia && window.matchMedia('(max-width: 899px)').matches)) selected = r.sel;
+    const t = comboCall('describe', [c, st], { title: '', detail: [] });
+    pushLog({ kind: 'auto', text: 'Combo, paso ' + play.n + ' de ' + c.steps.length + ': ' + t.title });
+    if (play.n >= c.steps.length) {
+      play.end = true;
+      pushLog({ kind: 'auto', text: 'Combo terminado: ' + q(c.name) });
+    }
+    render();
+  }
+  function renderPlayBar() {
+    const bar = $('#fd-vs');
+    if (!bar || !play) return;
+    const c = play.combo;
+    const N = c.steps.length;
+    const last = play.n ? comboCall('describe', [c, c.steps[play.n - 1]], { title: '', detail: [] }) : null;
+    const speed = playSpeed();
+    let text;
+    let sub = '';
+    if (play.why) { text = 'El combo se detuvo en el paso ' + (play.n + 1) + ' de ' + N + ': ' + play.why; sub = 'Puedes seguir a mano desde aquí o tocar «Repetir».'; }
+    else if (play.end) { text = 'Combo terminado: ' + q(c.name) + ' (' + N + (N === 1 ? ' paso).' : ' pasos).'); sub = 'Este es su campo final. Puedes seguir jugando a mano, Repetir o Cerrar.'; }
+    else if (!play.n) {
+      text = 'Reproduce ' + q(c.name) + ': ' + N + (N === 1 ? ' paso' : ' pasos') + '.';
+      sub = speed === 'step' || play.paused ? 'Toca «Siguiente» para hacer el primer paso.' : 'Empieza en un momento. Tocar el tablero, la mano o el panel lo pausa.';
+    } else { text = 'Paso ' + play.n + ' de ' + N + ': ' + last.title; sub = arr(last.detail).join(' · '); }
+    const btn = (act, label, kind, dis) => '<button type="button" data-rp="' + act + '"' + (kind ? ' class="' + kind + '"' : '') + (dis ? ' disabled' : '') + '>' + esc(label) + '</button>';
+    const btns = [btn('prev', '‹ Anterior', '', !play.n)];
+    if (play.end) btns.push(btn('again', 'Repetir', 'primary'), btn('stop', 'Cerrar', ''));
+    else {
+      if (speed !== 'step') btns.push(btn('toggle', play.paused ? '▶ Seguir' : 'Pausar', play.paused ? 'primary' : ''));
+      btns.push(btn('next', 'Siguiente ›', speed === 'step' || play.paused ? 'primary' : ''), btn('stop', 'Detener', ''));
+    }
+    const opts = PLAY_SPEEDS.map(([k, label]) => '<option value="' + k + '"' + (k === speed ? ' selected' : '') + '>' + esc(label) + '</option>').join('');
+    const pct = Math.round((play.n / N) * 100);
+    bar.className = 'fd-vs fd-play';
+    bar.hidden = false;
+    bar.innerHTML = '<div class="vs-in play' + (play.paused && !play.end ? ' paused' : '') + (play.end ? ' done' : '') + '">'
+      + (play.paused && !play.end ? '<span class="vs-tag">En pausa</span>' : '')
+      + '<p id="vs-msg">' + esc(text) + '</p><div class="vs-btns">' + btns.join('')
+      + (play.end ? '' : '<label class="rp-speed"><span class="sr">Velocidad</span><select id="rp-speed" aria-label="Velocidad">' + opts + '</select></label>') + '</div>'
+      + '<div class="rp-prog" role="progressbar" aria-label="Pasos hechos" aria-valuemin="0" aria-valuemax="' + N + '" aria-valuenow="' + play.n + '"><span style="width:' + pct + '%"></span></div>'
+      + (sub ? '<p class="vs-sub">' + esc(sub) + '</p>' : '') + '</div>';
+  }
+  function playClick(act) {
+    if (!play) return;
+    if (act === 'toggle') { play.paused = !play.paused; schedulePlay(); renderPlayBar(); }
+    else if (act === 'next') { stepPlay(); schedulePlay(); }
+    else if (act === 'prev') { if (play.n) { play.paused = true; schedulePlay(); undo(); } }
+    else if (act === 'again') { const x = decks().find((y) => y.id === play.deckId) || d; replay(x, play.combo); }
+    else if (act === 'stop') { stopPlay(); render(); }
+  }
+  /** Tocar el tablero, la mano o el panel mientras se reproduce: pausa (sin redibujar el tablero, así el toque sigue). */
+  function holdPlay() {
+    if (!play || play.paused || play.end) return;
+    play.paused = true;
+    schedulePlay();
+    renderPlayBar();
   }
   /** Terminar grabación: arma el combo con las fotos y pide un nombre para guardarlo (draft: el nombre que ya escribiste). */
   function finishRec(draft) {
@@ -5191,8 +5474,12 @@
     const onEl = (sel, fn) => { const el = $(sel); if (el) el.addEventListener('click', fn); };
     onEl('#fd-vs', (e) => {
       const b = e.target.closest('button');
+      if (b && !b.disabled && play && !isVs() && b.dataset.rp) { playClick(b.dataset.rp); return; }
       if (b && !b.disabled && isVs()) vsCall('barClick', [b]);
     });
+    // Reproducir un combo: la velocidad, y tocar el tablero, la mano o el panel lo pausa
+    { const bar = $('#fd-vs'); if (bar) bar.addEventListener('change', (e) => { if (e.target && e.target.id === 'rp-speed') { savePref({ replaySpeed: e.target.value }); schedulePlay(); renderPlayBar(); } }); }
+    ['#board', '#fd-hand', '#fd-side'].forEach((sel) => { const el = $(sel); if (el) el.addEventListener('pointerdown', holdPlay, true); });
     onEl('#vs-mylp', () => { if (isVs()) vsCall('adjustLp', ['me']); });
     onEl('#fd-concede', () => { if (isVs()) vsCall('concede'); });
     // Franja del rival: ver su mano, sus cartas, intentos y la ventana de Nuevo duelo
@@ -5442,5 +5729,7 @@
     select: (uid) => { selected = uid; render(); }, oppField: openOppField,
   };
   // openCombos: la ventana "Combos para el CPU" (la abre la sección Combos al ir a grabar uno nuevo)
-  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port, openCombos };
+  // replay(mazo, combo): reproduce un combo grabado en el campo (la sección Combos)
+  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port, openCombos, replay,
+    playing: () => (play ? { id: play.combo.id, n: play.n, total: play.combo.steps.length, paused: play.paused, end: play.end, why: play.why } : null) };
 })();
