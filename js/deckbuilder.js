@@ -1,6 +1,6 @@
 /* Pantalla del constructor de mazos: buscador, panel de detalle y edición del mazo. */
 (function () {
-  const { db, deck, store, view } = window.YGO;
+  const { db, deck, store, view, backup } = window.YGO;
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const esc = view.esc;
@@ -14,12 +14,29 @@
   let results = [];
   let shown = 0;
 
+  /** Guarda los mazos en este navegador → true | false (no deja: modo privado, almacenamiento lleno o bloqueado) */
   const persist = () => {
     prefs.lastDeckId = current.id;
-    store.save(decks);
+    const ok = store.save(decks);
     // Se mezcla con lo guardado: el campo y la prueba de mano guardan sus propias preferencias (fieldStrict, handSize)
     store.savePrefs(Object.assign(store.prefs(), { lastDeckId: current.id, useBanlist: prefs.useBanlist }));
+    renderSaveState(ok);
+    return ok;
   };
+  // Lo que dice al lado de Guardar; si el navegador no guarda, lo avisa una vez
+  let saveOk = null, warnedSave = false;
+  function renderSaveState(ok) {
+    const el = $('#save-state');
+    if (!el || ok === saveOk) return;
+    saveOk = ok;
+    el.className = 'save-state ' + (ok ? 'ok' : 'warn');
+    el.textContent = ok ? '✓ Guardado en este navegador' : 'Este navegador no está guardando tus mazos';
+    if (!ok && !warnedSave) {
+      warnedSave = true;
+      setTimeout(() => toast('Este navegador no está guardando tus mazos: haz una «Copia de seguridad» para no perderlos', 'warn'), 0);
+    }
+  }
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 
   /* ---------- Avisos ---------- */
   let toastTimer;
@@ -282,6 +299,95 @@
     show();
   }
 
+  /* ---------- Guardar y copia de seguridad ---------- */
+  async function saveNow() {
+    if (!persist()) { openSaveFailed(); return; }
+    toast('Guardado en este navegador: ' + plural(decks.length, 'mazo', 'mazos') + '. Para otro equipo, usa «Copia de seguridad»', 'ok');
+    await backup.persist(); // (que el navegador no lo borre aunque le falte espacio)
+  }
+  function openSaveFailed() {
+    modal('No se pudo guardar', '<p>Este navegador no deja guardar (modo privado, almacenamiento lleno o bloqueado por la página). '
+      + 'Tus mazos siguen aquí hasta que cierres la página.</p><p>Haz una <b>copia de seguridad</b> para no perderlos.</p>', [
+      { label: 'Cerrar' },
+      { label: 'Copia de seguridad', kind: 'primary', action: () => { openBackup(); return false; } },
+    ]);
+  }
+  function openBackup() {
+    const data = backup.make(decks);
+    const text = backup.toText(data);
+    const k = backup.counts(data);
+    backup.prefetch();
+    modal('Copia de seguridad', '<p>Un archivo con tus <b>' + plural(k.decks, 'mazo', 'mazos') + '</b>'
+      + (k.combos ? ' y tus <b>' + plural(k.combos, 'combo grabado', 'combos grabados') + '</b>' : '')
+      + '. Con él los recuperas si se borran los datos de este navegador, o los pasas a otro equipo (el sitio o claude.ai): ahí tocas <b>Restaurar copia</b>.</p>'
+      + '<p class="hint">Guárdalo donde no se pierda (Drive, correo, un chat contigo). Si no se descarga, usa <b>Copiar texto</b> y pégalo en una nota.</p>'
+      + '<textarea id="m-backup" rows="5" readonly spellcheck="false" hidden aria-label="Texto de la copia"></textarea>', [
+      { label: 'Restaurar copia…', action: () => { openRestore(); return false; } },
+      { label: 'Copiar texto', action: () => {
+        const ta = $('#m-backup');
+        const fallback = () => { ta.hidden = false; ta.value = text; ta.focus(); ta.select(); toast('Texto seleccionado: cópialo con Ctrl+C (o mantén presionado)'); };
+        try {
+          navigator.clipboard.writeText(text).then(() => toast('Copia copiada: pégala en una nota o en un chat contigo', 'ok'), fallback);
+        } catch (e) { fallback(); }
+        return false;
+      } },
+      { label: 'Descargar copia', kind: 'primary', action: () => {
+        backup.download(backup.filename(), text).then((r) => {
+          if (r === 'saved') toast('Copia guardada', 'ok');
+          else if (r === 'browser') toast('Copia descargada: búscala en Descargas (si no aparece, usa «Copiar texto»)', 'ok');
+          else if (r === 'declined') toast('No se guardó la copia');
+          else if (r === 'busy') toast('Ya hay una descarga esperando: acéptala o recházala primero');
+          else toast('No se pudo descargar: usa «Copiar texto»', 'warn');
+        });
+        return false;
+      } },
+      { label: 'Cerrar' },
+    ]);
+  }
+  function openRestore() {
+    modal('Restaurar copia', '<p class="hint">Elige el archivo de la copia (<i>' + esc(backup.APP) + '-copia-….json</i>) o pega su texto. Antes de cambiar nada te muestro qué trae.</p>'
+      + '<label class="field"><span>Archivo de la copia</span><input id="m-bfile" type="file" accept=".json,.txt,application/json,text/plain"></label>'
+      + '<label class="field"><span>O pega el texto</span><textarea id="m-btext" rows="6" spellcheck="false"></textarea></label>', [
+      { label: 'Cancelar' },
+      { label: 'Revisar copia', kind: 'primary', action: () => { review($('#m-btext').value); return false; } },
+    ]);
+    $('#m-bfile').addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const r = new FileReader();
+      r.onload = () => { $('#m-btext').value = r.result; review(r.result); };
+      r.readAsText(f);
+    });
+  }
+  function review(text) {
+    const r = backup.parse(text);
+    if (!r.ok) { toast(r.why, 'warn'); return; }
+    const data = r.data;
+    const p = backup.plan(decks, data);
+    const k = backup.counts(data);
+    const at = backup.when(data.savedAt);
+    const names = (xs) => xs.map((x) => '<b>' + esc(x.inc.name) + '</b>').join(', ');
+    modal('Restaurar copia', '<p>La copia' + (at ? ' del ' + esc(at) : '') + ' trae ' + plural(k.decks, 'mazo', 'mazos')
+      + (k.combos ? ' y ' + plural(k.combos, 'combo grabado', 'combos grabados') : '') + '.</p>'
+      + (p.replace.length ? '<p>Se reemplazan (el mismo mazo o el mismo nombre): ' + names(p.replace) + '.</p>' : '')
+      + (p.add.length ? '<p>Se agregan: ' + names(p.add) + '.</p>' : '')
+      + '<p class="hint">Tus otros mazos no cambian. Los combos se suman a los que ya tenías.</p>', [
+      { label: 'Cancelar' },
+      { label: 'Restaurar', kind: 'primary', action: () => {
+        const out = backup.apply(decks, data, p);
+        decks = out.list;
+        current = decks.find((d) => d.id === current.id) || out.decks[0] || decks[0];
+        renderDeckSelect();
+        commit();
+        const what = [p.replace.length ? plural(p.replace.length, 'mazo reemplazado', 'mazos reemplazados') : '',
+          p.add.length ? plural(p.add.length, 'mazo agregado', 'mazos agregados') : '',
+          out.combos ? plural(out.combos, 'combo', 'combos') : ''].filter(Boolean).join(', ');
+        if (saveOk === false || out.unsaved) toast('Copia restaurada (' + what + '), pero este navegador no la guarda: dura hasta que cierres la página', 'warn');
+        else toast('Copia restaurada: ' + what, 'ok');
+      } },
+    ]);
+  }
+
   function openImport() {
     modal('Importar mazo', '<p class="hint">Acepta archivos .ydk, enlaces <i>ydke://</i> y listas de texto como las que exporta Dueling Nexus (<i>3x Ash Blossom &amp; Joyous Spring</i>).</p>'
       + '<label class="field"><span>Archivo .ydk o .txt</span><input id="m-file" type="file" accept=".ydk,.txt,text/plain"></label>'
@@ -511,7 +617,7 @@
       toast('Mazo duplicado', 'ok');
     });
     $('#btn-del').addEventListener('click', () => modal('Eliminar mazo',
-      '<p>Se borrará <b>' + esc(current.name) + '</b> de este navegador. Exporta el .ydk antes si quieres conservarlo.</p>', [
+      '<p>Se borrará <b>' + esc(current.name) + '</b> de este navegador. Haz una «Copia de seguridad» o exporta el .ydk antes si quieres conservarlo.</p>', [
         { label: 'Cancelar' },
         { label: 'Eliminar', kind: 'danger', action: () => {
           decks = decks.filter((d) => d !== current);
@@ -529,6 +635,8 @@
         } },
       ]));
     $('#btn-import').addEventListener('click', openImport);
+    $('#btn-save').addEventListener('click', saveNow);
+    $('#btn-backup').addEventListener('click', openBackup);
     $('#btn-export').addEventListener('click', openExport);
 
     $('#opt-banlist').checked = prefs.useBanlist;

@@ -41,6 +41,7 @@
         <div class="deckpick">
           <label class="sr" for="deck-select">Mazo</label>
           <select id="deck-select"></select>
+          <button id="btn-save" type="button" class="save-btn" title="Guarda tus mazos en este navegador">Guardar</button>
           <button id="btn-new" type="button">Nuevo</button>
           <button id="btn-rename" type="button">Renombrar</button>
           <button id="btn-dup" type="button">Duplicar</button>
@@ -49,6 +50,7 @@
         <div class="deckacts">
           <button id="btn-sort" type="button">Ordenar</button>
           <button id="btn-clear" type="button">Vaciar</button>
+          <button id="btn-backup" type="button" title="Un archivo con tus mazos y combos para recuperarlos o pasarlos a otro equipo">Copia de seguridad</button>
           <button id="btn-import" type="button">Importar</button>
           <button id="btn-export" type="button" class="primary">Exportar</button>
         </div>
@@ -56,6 +58,7 @@
       <div class="deckstatus">
         <div id="breakdown" class="breakdown"></div>
         <label class="switch"><input id="opt-banlist" type="checkbox"><span>Aplicar banlist</span></label>
+        <p id="save-state" class="save-state" role="status"></p>
         <p id="validity" class="validity"></p>
         <p id="pending-note" class="pending-note" hidden></p>
       </div>
@@ -243,8 +246,10 @@
 <script src="data/banlist.js"></script>
 <script src="js/sample-deck.js"></script>
 <script src="js/preset-decks.js"></script>
+<script src="js/preset-combos.js"></script>
 <script src="js/carddb.js"></script>
 <script src="js/deck.js"></script>
+<script src="js/backup.js"></script>
 <script src="js/cardview.js"></script>
 <script src="js/online.js"></script>
 <script src="js/game.js"></script>

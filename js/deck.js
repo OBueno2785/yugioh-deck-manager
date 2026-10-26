@@ -244,6 +244,18 @@
   const write = (k, v) => {
     try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; }
   };
+  /** Deja un mazo leído (guardado o de una copia de seguridad) listo para usar: secciones que faltan, códigos que la base
+   * ya no conoce (p. ej. cartas en línea cuyo caché se borró: se apartan para no romper la app) y cartas pendientes que
+   * ahora trae la base (también sin conexión). */
+  const clean = (d) => {
+    for (const s of SECTIONS) {
+      if (!Array.isArray(d[s])) d[s] = [];
+      const bad = d[s].filter((id) => !db.get(id));
+      if (bad.length) { d[s] = d[s].filter((id) => db.get(id)); d.unknownIds = (d.unknownIds || []).concat(bad); }
+    }
+    deck.resolvePending(d);
+    return d;
+  };
   /** Preferencias guardadas; si lo guardado no es un objeto (p. ej. 'null'), se empieza de cero. */
   const readPrefs = () => {
     const p = read(PREF, {});
@@ -259,16 +271,7 @@
         const s = window.YGO_SAMPLE_DECK;
         list = [s ? deck.create(s.name, { main: s.main.slice(), extra: s.extra.slice(), side: s.side.slice() }) : deck.create()];
       }
-      // Códigos que la base ya no conoce (p. ej. cartas en línea cuyo caché se borró): se apartan para no romper la app
-      for (const d of list) {
-        for (const s of SECTIONS) {
-          if (!Array.isArray(d[s])) d[s] = [];
-          const bad = d[s].filter((id) => !db.get(id));
-          if (bad.length) { d[s] = d[s].filter((id) => db.get(id)); d.unknownIds = (d.unknownIds || []).concat(bad); }
-        }
-        // Cartas que faltaban al importar y que ahora trae la base (también sin conexión)
-        deck.resolvePending(d);
-      }
+      list.forEach(clean);
       // Mazos compartidos en el proyecto: se agregan una sola vez a la lista guardada
       const prefs = readPrefs();
       const added = Array.isArray(prefs.presetsAdded) ? prefs.presetsAdded : [];
@@ -297,10 +300,16 @@
         else prefs.lastDeckId = d.id;
       }
       prefs.presetsAdded = added;
+      // Sus combos compartidos (js/preset-combos.js), una vez
+      if (YGO.combos && YGO.combos.seedPresets) {
+        try { YGO.combos.seedPresets(list, prefs); } catch (e) { /* sin combos: los mazos igual cargan */ }
+      }
       write(PREF, prefs);
       return list;
     },
+    /** Guarda la lista → true | false (el navegador no deja: modo privado, almacenamiento lleno o bloqueado) */
     save(list) { return write(KEY, list); },
+    clean,
     prefs() { return readPrefs(); },
     savePrefs(p) { return write(PREF, p); },
   };

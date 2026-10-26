@@ -112,6 +112,52 @@
     if (gone) save();
     return gone;
   }
+  /** Para la copia de seguridad: los combos de esos mazos → { deckId: [combo] } (copias, sin los dañados) */
+  function exportFor(deckIds) {
+    reload();
+    const out = {};
+    for (const id of arr(deckIds)) { const s = slot(id); if (s.length) out[keyOf(id)] = s.map(copy); }
+    return out;
+  }
+  /** Restaurar una copia: agrega a un mazo los combos que todavía no tiene (mismo id = el mismo combo) → cuántos agregó.
+   * unsaved: el navegador no dejó guardarlos (quedan en memoria). */
+  function importFor(deckId, list) {
+    reload();
+    const s = slot(deckId);
+    let n = 0;
+    for (const c of arr(list)) {
+      if (s.length >= CAP) break; // (un mazo lleno no pierde los suyos)
+      if (!valid(c) || s.some((x) => x.id === c.id)) continue;
+      s.push(Object.assign(copy(c), { deckId: deckId }));
+      n++;
+    }
+    return { added: n, unsaved: n > 0 && !save() };
+  }
+  /** Combos compartidos (js/preset-combos.js, por presetId del mazo compartido): los suma una vez a ese mazo de la lista
+   * (prefs.presetCombosAdded guarda cuáles ya se sumaron: si borras uno, no vuelve) → cuántos sumó. Lo llama
+   * YGO.store.load, que guarda prefs. */
+  function seedPresets(decks, prefs) {
+    const groups = arr(window.YGO_PRESET_COMBOS);
+    if (!groups.length || !prefs) return 0;
+    const done = arr(prefs.presetCombosAdded).slice();
+    let n = 0;
+    reload();
+    for (const g of groups) {
+      const d = arr(decks).find((x) => x && g && x.presetId === g.presetId);
+      if (!d) continue;
+      const s = slot(d.id);
+      for (const c of arr(g.combos)) {
+        if (!c || !c.id || done.includes(c.id)) continue;
+        done.push(c.id);
+        if (!valid(c) || s.some((x) => x.id === c.id) || s.length >= CAP) continue;
+        s.push(Object.assign(copy(c), { deckId: d.id, deckName: d.name }));
+        n++;
+      }
+    }
+    prefs.presetCombosAdded = done;
+    if (n) save();
+    return n;
+  }
 
   /* ---------- Grabar: fotos → pasos ---------- */
   /** Dónde está cada carta en una foto de field.js: uid → { a: pila|'field'|'mat', z, fd, def, sm, st, host, i, id, tok, opp } */
@@ -469,7 +515,8 @@
     const uid = map[r];
     if (uid) {
       const f = where(S, uid);
-      if (!f || (area && f.where !== area) || (Number(f.inst.id) !== Number(x.id) && !x.tok)) return null;
+      // (una carta robada es la que haya salido, no la de la grabación)
+      if (!f || (area && f.where !== area) || (Number(f.inst.id) !== Number(x.id) && !x.tok && x.from !== 'draw')) return null;
       return { uid, f };
     }
     if (x.from === 'token') return null;
@@ -833,7 +880,7 @@
   }
 
   YGO.combos = {
-    KEY, CAP, list, count, get, add, update, remove, build, describe, handNames, finalNames, zoneEs,
+    KEY, CAP, list, count, get, add, update, remove, exportFor, importFor, seedPresets, build, describe, handNames, finalNames, zoneEs,
     nextAct, run, resolveLink, fromDeck, feasible: (S, c) => (S && S.opp && c ? feasible(S, c) : false),
     // Para las pruebas: lo que hay guardado (sin copiar) y empezar de cero
     _reset: () => { cache = {}; save(); },
