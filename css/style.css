@@ -256,6 +256,8 @@ button.save-btn { border-color: var(--ok); color: var(--ok); }
 .field > span { font: 600 12px var(--data); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .hint { color: var(--muted); }
 .modal-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+/* Ventana más alta que la pantalla (Nuevo duelo en el móvil): el cuerpo se desplaza y los botones quedan a la vista */
+.modal-foot { position: sticky; bottom: -18px; margin-bottom: -18px; padding: 6px 0 18px; background: var(--panel); }
 .toast {
   position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 60;
   background: var(--raised); border: 1px solid var(--line); padding: 9px 16px; border-radius: 14px;

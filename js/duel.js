@@ -593,6 +593,7 @@
       v: 1, seed, first, firstPref: pref, coin, pace: ['normal', 'fast', 'step'].includes(cfg.pace) ? cfg.pace : 'normal', paused: false,
       askOnly: cfg.askOnly !== false, responds: cfg.responds !== false, rival: { id: o.deckId, name: o.name },
       combos: cfg.combos !== false, // repite los combos grabados de su mazo (js/combos.js)
+      autoGo: cfg.autoGo !== false, // la ventana a la que puedes responder sigue sola a los 10 s si no tocas nada (js/vs.js)
       over: null, win: null, warned: {}, recorded: null,
     };
     tsOf(S);

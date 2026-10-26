@@ -435,7 +435,7 @@
     const v = S.vs;
     S.start = {
       deckId: d.id, hand: S.hand.map((x) => x.id), second: r.first === 'rival',
-      vs: { rivalId: v.rival ? v.rival.id : null, firstPref: v.firstPref, pace: v.pace, askOnly: v.askOnly, responds: v.responds, combos: v.combos !== false },
+      vs: { rivalId: v.rival ? v.rival.id : null, firstPref: v.firstPref, pace: v.pace, askOnly: v.askOnly, responds: v.responds, combos: v.combos !== false, autoGo: v.autoGo !== false },
     };
     render();
     vsCall('begin');
@@ -4563,6 +4563,7 @@
     const vsCfg = st.vsCfg || {
       deck: myDeck, myDeckId: myDeck ? myDeck.id : null, rivalId: prefs.vsRivalDeckId, firstPref: prefs.vsFirst || 'coin',
       pace: prefs.vsPace || 'normal', askOnly: prefs.vsAskOnly !== false, responds: prefs.vsResponds !== false, combos: prefs.vsCombos !== false,
+      autoGo: prefs.vsAutoGo !== false,
     };
     vsCfg.deck = myDeck;
     vsCfg.myDeckId = myDeck ? myDeck.id : null;
@@ -4657,6 +4658,7 @@
       if (typeof cfg.askOnly === 'boolean') patch.vsAskOnly = cfg.askOnly;
       if (typeof cfg.responds === 'boolean') patch.vsResponds = cfg.responds;
       if (typeof cfg.combos === 'boolean') patch.vsCombos = cfg.combos;
+      if (typeof cfg.autoGo === 'boolean') patch.vsAutoGo = cfg.autoGo;
       savePref(patch);
       if (opts.deck) d = opts.deck;
       newDuel(null, null, { vs: cfg });
@@ -5353,7 +5355,7 @@
     if (!p.fieldVs || !vsReady()) return false;
     const rival = decks().find((x) => x && p.vsRivalDeckId != null && String(x.id) === String(p.vsRivalDeckId));
     if (rival && arr(rival.main).length >= 5) {
-      newDuel(null, null, { vs: { rival, firstPref: p.vsFirst, pace: p.vsPace, askOnly: p.vsAskOnly !== false, responds: p.vsResponds !== false, combos: p.vsCombos !== false } });
+      newDuel(null, null, { vs: { rival, firstPref: p.vsFirst, pace: p.vsPace, askOnly: p.vsAskOnly !== false, responds: p.vsResponds !== false, combos: p.vsCombos !== false, autoGo: p.vsAutoGo !== false } });
       if (isVs()) return true;
     } else newDuel();
     openSetup({ vs: true });

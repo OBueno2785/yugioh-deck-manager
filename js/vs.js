@@ -22,6 +22,7 @@
 
   const PACE = { normal: 700, fast: 250, step: 0 };
   const WAIT_NO_ANSWER = 1200; // ventana sin nada con qué responder (Detenerse solo cuando puedo responder)
+  let autoMs = 10000;          // ventana a la que puedes responder: sigue sola si no tocas nada (Sigue solo; las pruebas lo cambian)
   const RETRY = 500;           // el rival espera (una ventana abierta, una invocación a medias…): vuelve a mirar
   const HAND_MAX = 6;
   const MON = ['emz0', 'emz1', 'mz0', 'mz1', 'mz2', 'mz3', 'mz4'];
@@ -45,6 +46,7 @@
   let running = false;  // un paso del rival en curso (no se encadena otro)
   let endTimer = null;
   let goneTimer = null; // tu atacante dejó el campo: el ataque se detiene después del dibujo
+  let cdTimer = null;   // la cuenta atrás de "Sigue solo" en la barra
 
   function freshUi() { return { mode: null, attacker: null, targets: new Set(), direct: false }; }
 
@@ -121,7 +123,20 @@
       if (w.kind === 'mine-attack') return null;                  // espera Calcular daño / El ataque no sigue
       if (myLinks(s)) return null;                                // respondiste: espera Resolver cadena
       if (w.responded) return null;                               // ya respondiste a su ataque: espera Seguir
-      if (!s.vs.askOnly || canRespond(w.kind)) return null;       // espera Seguir
+      if (!s.vs.askOnly || canRespond(w.kind)) {
+        // Puedes responder: espera Seguir; con "Sigue solo", sigue a los 10 s si no tocas nada (tocar algo la deja esperando)
+        if (!autoOn(s, w)) return null;
+        if (blocked(P())) { hold(w, true); return null; }         // (abriste algo: estás respondiendo)
+        const now = Date.now();
+        // (sin cuenta o una vieja: volviste de otra pantalla, Reanudar…) empieza de nuevo
+        if (!w.autoAt || now > w.autoAt + 1000) w.autoAt = now + autoMs;
+        want = { key: winKey(w) + ':auto', ms: Math.max(0, w.autoAt - now), fn: () => {
+          const s2 = S();
+          if (!s2 || !s2.vs || s2.vs.win !== w || !autoOn(s2, w) || gate(s2) !== 'go') return;
+          continueWindow();
+        } };
+        return want;
+      }
       want = { key: winKey(w), ms: WAIT_NO_ANSWER, fn: () => {    // no tienes con qué responder: sigue solo
         const s2 = S();
         if (!s2 || !s2.vs || s2.vs.win !== w || w.responded || gate(s2) !== 'go' || myLinks(s2) || (s2.vs.askOnly && canRespond(w.kind))) return;
@@ -134,6 +149,53 @@
     }
     if (blocked(P())) return { key: 'retry', ms: RETRY, fn: () => {} };
     return want;
+  }
+  /** ¿Esta ventana sigue sola? (Sigue solo en "Nuevo duelo"; no en Paso a paso, ni si la tocaste, respondiste o está en pausa) */
+  const autoOn = (s, w) => !!(s && s.vs && s.vs.autoGo !== false && s.vs.pace !== 'step' && w && !w.held && !w.responded
+    && w.kind !== 'mine-attack' && !s.vs.paused && !myLinks(s) && !pvpOn(s));
+  /** Tocaste algo mientras el rival espera tu respuesta: la ventana espera tu Seguir. */
+  function hold(w, quiet) {
+    if (!w || w.held) return;
+    w.held = true;
+    w.autoAt = 0;
+    if (timerKey && /:auto$/.test(timerKey)) clearTimer();
+    const p = P();
+    if (p && !quiet) p.render();
+  }
+  // Tocar tus cartas, el tablero, el panel o la franja del rival con su ventana abierta = estás pensando una respuesta
+  if (typeof document !== 'undefined') {
+    document.addEventListener('pointerdown', (e) => {
+      const s = S();
+      const w = s && s.vs && s.vs.win;
+      if (!w || w.held || !isVs() || !autoOn(s, w)) return;
+      const el = e.target;
+      // (sin dibujar aquí: el clic que sigue cambiaría de carta; la barra se pone al día con la cuenta atrás)
+      if (el && el.closest && el.closest('#fd-hand, #board, #fd-side, #fd-chain-strip, #fd-opp')) hold(w, true);
+    }, true);
+  }
+  /** Segundos que faltan para que la ventana siga sola, o null si no está contando. */
+  function autoLeft(s) {
+    const w = s && s.vs && s.vs.win;
+    if (!w || !w.autoAt || !autoOn(s, w) || timerKey !== winKey(w) + ':auto') return null;
+    return Math.max(1, Math.ceil((w.autoAt - Date.now()) / 1000));
+  }
+  /** Dibuja la barra (y mantiene viva la cuenta atrás mientras cuenta). */
+  function drawBar(s) {
+    const bar = $('#fd-vs');
+    if (bar) {
+      const html = V().bar(barModel(s));
+      if (html !== lastBar || !bar.innerHTML) { bar.innerHTML = html; lastBar = html; }
+      bar.hidden = false;
+    }
+    const counting = autoLeft(s) != null;
+    if (counting && !cdTimer) {
+      const g = gen;
+      cdTimer = setInterval(() => {
+        const s2 = S();
+        if (g !== gen || !isVs() || autoLeft(s2) == null) { clearInterval(cdTimer); cdTimer = null; if (g === gen && isVs()) drawBar(s2); return; }
+        drawBar(s2);
+      }, 250);
+    } else if (!counting && cdTimer) { clearInterval(cdTimer); cdTimer = null; }
   }
   function tick() {
     const s = S();
@@ -685,7 +747,9 @@
       const resp = myLinks(s);
       const seguir = { id: 'vs-next', label: resp ? 'Resolver cadena' : 'Seguir', kind: 'primary' };
       const auto = s.vs.askOnly && !resp && !s.vs.paused && !w.responded && !canRespond(w.kind);
+      const left = auto ? null : autoLeft(s);
       const sub = auto ? 'No tienes con qué responder: sigue solo.'
+        : left != null ? 'Si no tocas nada, sigue solo en ' + left + ' s. Toca una carta tuya o Pausar para pensar.'
         : w.responded && !resp ? 'Si algo de tu respuesta quedó a mano, hazlo ahora (toca sus cartas) y pulsa Seguir para calcular el daño.'
         : w.kind === 'activation' ? 'Si tu respuesta niega el efecto del rival, toca «Negado» en su eslabón.' : '';
       if (w.kind === 'attack') {
@@ -727,6 +791,7 @@
       case 'vs-direct': return declareAttack(null);
       case 'vs-cancel': return cancelTarget();
       case 'vs-pause':
+        if (!s.vs.paused && s.vs.win && autoOn(s, s.vs.win)) hold(s.vs.win, true); // (pausar = pensar: al reanudar espera tu Seguir)
         s.vs.paused = !s.vs.paused;
         clearTimer();
         p.render();
@@ -891,12 +956,9 @@
       }, 0);
     }
     if (ui.mode === 'target' && (s.vs.over || !t.mine || t.phase !== 'battle' || arr(s.chain).length || !attackOk(s, ui.attacker))) ui = freshUi();
-    const bar = $('#fd-vs');
-    if (bar) {
-      const html = V().bar(barModel(s));
-      if (html !== lastBar || !bar.innerHTML) { bar.innerHTML = html; lastBar = html; }
-      bar.hidden = false;
-    }
+    // (primero el temporizador del rival: la barra muestra su cuenta atrás)
+    schedule();
+    drawBar(s);
     // Tus monstruos que pueden atacar ahora
     const free = !s.vs.over && !s.vs.win && !arr(s.chain).length && t.mine && t.phase === 'battle';
     MON.forEach((z) => {
@@ -968,6 +1030,7 @@
       askOnly: cfg.askOnly !== undefined ? cfg.askOnly !== false : pr.vsAskOnly !== false,
       responds: cfg.responds !== undefined ? cfg.responds !== false : pr.vsResponds !== false,
       combos: cfg.combos !== undefined ? cfg.combos !== false : pr.vsCombos !== false,
+      autoGo: cfg.autoGo !== undefined ? cfg.autoGo !== false : pr.vsAutoGo !== false,
     };
   }
   /** Filas VS de la ventana "Nuevo duelo" (todas con la clase su-vsrow). */
@@ -988,6 +1051,8 @@
       + '<div class="field su-vsrow"><span>Ritmo del rival</span>' + seg('su-pace', 'pace', [['normal', 'Normal'], ['fast', 'Rápido'], ['step', 'Paso a paso']], st.pace)
       + '<p class="hint su-note" id="su-pace-note">' + esc(paceNote(st.pace)) + '</p></div>'
       + '<label class="switch su-vsrow"><input type="checkbox" id="su-askonly"' + (st.askOnly ? ' checked' : '') + '><span>Detenerse solo cuando puedo responder</span></label>'
+      + '<label class="switch su-vsrow"><input type="checkbox" id="su-autogo" aria-describedby="su-autogo-note"' + (st.autoGo ? ' checked' : '') + '><span>Si puedo responder, sigue solo a los 10 s</span></label>'
+      + '<p class="hint su-note su-vsrow" id="su-autogo-note">Mientras cuenta, tocar una carta tuya o Pausar lo deja esperando tu «Seguir». En Paso a paso siempre espera.</p>'
       + '<label class="switch su-vsrow"><input type="checkbox" id="su-responds"' + (st.responds ? ' checked' : '') + '><span>El rival responde en mi turno (handtraps y cartas colocadas)</span></label>'
       + '<label class="switch su-vsrow"><input type="checkbox" id="su-combos" aria-describedby="su-combos-note"' + (st.combos ? ' checked' : '') + '><span>El rival usa sus combos grabados</span></label>'
       + '<p class="hint su-note su-vsrow" id="su-combos-note">' + esc(combosNote(st.rival, st.combos)) + '</p>'
@@ -1061,8 +1126,10 @@
       rival, rivalId: rival ? rival.id : null,
       firstPref: pressed('first', st.first), pace: pressed('pace', st.pace),
       askOnly: box('su-askonly', st.askOnly), responds: box('su-responds', st.responds), combos: box('su-combos', st.combos),
+      autoGo: box('su-autogo', st.autoGo),
     };
-    cfg.prefs = { fieldVs: true, vsRivalDeckId: cfg.rivalId, vsFirst: cfg.firstPref, vsPace: cfg.pace, vsAskOnly: cfg.askOnly, vsResponds: cfg.responds, vsCombos: cfg.combos };
+    cfg.prefs = { fieldVs: true, vsRivalDeckId: cfg.rivalId, vsFirst: cfg.firstPref, vsPace: cfg.pace, vsAskOnly: cfg.askOnly, vsResponds: cfg.responds, vsCombos: cfg.combos,
+      vsAutoGo: cfg.autoGo };
     return cfg;
   }
 
@@ -1108,6 +1175,8 @@
     attack(attacker, target) { if (!isVs()) return; startAttack(attacker); if (ui.mode === 'target') declareAttack(target || null); },
     damage() { if (isVs()) damageStep(); },
     pause(on) { const s = S(); if (!isVs()) return; s.vs.paused = on !== false; clearTimer(); P().render(); },
+    /** Cuánto espera "Sigue solo" (ms; sin número, vuelve a los 10 s) → el valor de ahora */
+    autoMs(ms) { autoMs = Number(ms) > 0 ? Number(ms) : 10000; return autoMs; },
   };
 
   YGO.vs = {
