@@ -210,16 +210,14 @@
       { label: 'Borrar', kind: 'danger', action: () => { call('remove', [c.id]); sel = null; render(); } },
     ]);
   }
-  /** Al campo (Prueba) con la mano del combo; lo que falta para 5 (6 si se grabó yendo segundo) sale al azar del mazo. */
+  /** Al campo (Prueba) solo con la mano del combo (Oscar: los combos empiezan solo con su carta inicial); el resto queda en el Mazo. */
   function practice() {
     const c = current();
     if (!c || !YGO.field) return;
     const rest = d.main.slice();
     const hand = [];
     for (const id of arr(c.hand)) { const i = rest.indexOf(Number(id)); if (i >= 0) hand.push(rest.splice(i, 1)[0]); }
-    const n = c.second ? 6 : 5;
-    while (hand.length < n && rest.length) hand.push(rest.splice(Math.floor(Math.random() * rest.length), 1)[0]);
-    if (YGO.field.load(d, hand, rest, { second: !!c.second }) === false) return;
+    if (YGO.field.load(d, hand, rest, { second: !!c.second, exactHand: true }) === false) return;
     YGO.go('campo');
   }
   /** Al campo (Prueba) a ver el combo jugarse solo, paso a paso (YGO.field.replay). */

@@ -375,7 +375,8 @@
   }
 
   /** Duelo nuevo. handIds/restIds: mano y mazo exactos (si no, se reparte al azar).
-   * opts: { second, bot: { enabled, count, mode, pool, seed, forceHand } }; sin opts.bot se usan las preferencias. */
+   * opts: { second, exactHand, bot: { enabled, count, mode, pool, seed, forceHand } }; sin opts.bot se usan las preferencias.
+   * exactHand: la mano es solo handIds aunque vayas segundo (sin el robo del turno; para empezar un combo con su carta). */
   function newDuel(handIds, restIds, opts) {
     opts = opts || {};
     // Un duelo en línea en juego que se reemplaza por otro sin pasar por la sala: el rival se entera (gana él)
@@ -409,12 +410,13 @@
     S.extra = d.extra.map(game.instance);
     // Modo VS: el rival con su propio mazo (js/duel.js). Si no se puede, sigue como Prueba.
     if (opts.vs && startVs(opts.vs)) return;
-    if (second) secondDraw(!!handIds && handIds.length >= 6);
+    if (second && handIds && opts.exactHand) S.turnState.phase = 'draw';
+    else if (second) secondDraw(!!handIds && handIds.length >= 6);
     const cfg = botConfig(opts.bot);
     S.opp = makeOpponent(cfg);
     // Para "Misma mano, otras handtraps" y para cambiar entre Primero y Segundo con la misma mano
     S.start = {
-      deckId: d.id, hand: S.hand.map((x) => x.id), second,
+      deckId: d.id, hand: S.hand.map((x) => x.id), second, exactHand: !!(handIds && opts.exactHand),
       bot: { enabled: !!S.opp, count: cfg.count, mode: cfg.mode, pool: cfg.pool || null },
     };
     render();
@@ -4755,7 +4757,9 @@
     }
     if (!st || st.deckId !== d.id) { newDuel(null, null, cfg); return; }
     let hand = st.hand.slice();
-    if (!cfg.second && st.second) hand = hand.slice(0, 5);
+    if (!cfg.second && st.second && !st.exactHand) hand = hand.slice(0, 5);
+    // La mano de un combo (Reproducir / Practicar) sigue siendo solo esa, también al cambiar a segundo
+    if (st.exactHand) cfg.exactHand = true;
     newDuel(hand, restOf(hand), cfg);
   }
 
@@ -4869,9 +4873,9 @@
     }));
   }
   /* ---------- Reproducir un combo ----------
-   * Pedido de Oscar (2026-10-26): ver un combo grabado jugarse solo en tu campo. Empieza un duelo de Prueba con la mano del
-   * combo (y lo que falta para 5, o 6 si se grabó yendo segundo, del Mazo al azar: cartas que el combo no saca del Mazo) y
-   * cada paso mueve tus cartas a donde quedaron en la grabación: es la grabación otra vez, sin reglas ni rival de handtraps.
+   * Pedido de Oscar (2026-10-26): ver un combo grabado jugarse solo en tu campo. Empieza un duelo de Prueba solo con la mano
+   * del combo (Oscar: "los combos son one card combos, deben iniciar solo con la carta inicial de mano"; el resto queda en el
+   * Mazo) y cada paso mueve tus cartas a donde quedaron en la grabación: es la grabación otra vez, sin reglas ni rival de handtraps.
    * La barra de arriba dice qué hace cada paso; Lento / Normal / Rápido / Paso a paso (pref replaySpeed). Cada paso toma una
    * foto: «Anterior» o Deshacer vuelven un paso. Tocar el tablero, la mano o el panel lo pausa; al terminar, el campo queda
    * para seguir a mano. */
@@ -4884,16 +4888,9 @@
     if (!deckObj || !combo || !arr(combo.steps).length || !combosReady()) return false;
     const rest = arr(deckObj.main).map(Number);
     const hand = [];
-    const take = (id) => { const i = rest.indexOf(Number(id)); if (i >= 0) hand.push(rest.splice(i, 1)[0]); };
-    arr(combo.hand).forEach(take);
-    const need = new Set(arr(combo.needs && combo.needs.deck).map(Number));
-    arr(combo.refs).forEach((x) => { if (x && x.from === 'draw') need.add(Number(x.id)); });
-    const n = combo.second ? 6 : 5;
-    const free = game.shuffle(rest.filter((id) => !need.has(id)));
-    while (hand.length < n && free.length) take(free.shift());
-    while (hand.length < n && rest.length) hand.push(rest.splice(Math.floor(Math.random() * rest.length), 1)[0]);
+    for (const id of arr(combo.hand)) { const i = rest.indexOf(Number(id)); if (i >= 0) hand.push(rest.splice(i, 1)[0]); }
     stopPlay();
-    if (load(deckObj, hand, rest, { second: !!combo.second, bot: { enabled: false } }) === false) return false;
+    if (load(deckObj, hand, rest, { second: !!combo.second, exactHand: true, bot: { enabled: false } }) === false) return false;
     if (isVs()) return false;
     // El combo empieza en la Fase Principal 1
     if (S.turnState.phase !== 'main1') {
@@ -5412,7 +5409,9 @@
       confirmRestart(() => {
         savePref({ fieldSecond: second });
         const recOn = restartKeepingRec(() => restartSameHand({ second, keepBot: true }));
-        toast((second ? 'Vas segundo: robaste 1 carta en la Fase de Robo' : 'Vas primero: 5 cartas, sin robo ni Fase de Batalla') + (recOn ? ' · sigues grabando' : ''), 'ok');
+        const only = !!(S.start && S.start.exactHand);
+        toast((second ? (only ? 'Vas segundo, solo con la mano del combo (sin robo)' : 'Vas segundo: robaste 1 carta en la Fase de Robo')
+          : only ? 'Vas primero, solo con la mano del combo' : 'Vas primero: 5 cartas, sin robo ni Fase de Batalla') + (recOn ? ' · sigues grabando' : ''), 'ok');
       }, { keepRec: true });
     }));
     $('#fd-new').addEventListener('click', () => openSetup());
