@@ -134,8 +134,9 @@
     return { added: n, unsaved: n > 0 && !save() };
   }
   /** Combos compartidos (js/preset-combos.js, por presetId del mazo compartido): los suma una vez a ese mazo de la lista
-   * (prefs.presetCombosAdded guarda cuáles ya se sumaron: si borras uno, no vuelve) → cuántos sumó. Lo llama
-   * YGO.store.load, que guarda prefs. */
+   * (prefs.presetCombosAdded guarda cuáles ya se sumaron: si borras uno, no vuelve) → cuántos sumó o actualizó. Uno con
+   * rev más alto que el guardado lo reemplaza, con el nombre que le pusiste y si el CPU lo usa. Lo llama YGO.store.load,
+   * que guarda prefs. */
   function seedPresets(decks, prefs) {
     const groups = arr(window.YGO_PRESET_COMBOS);
     if (!groups.length || !prefs) return 0;
@@ -147,7 +148,16 @@
       if (!d) continue;
       const s = slot(d.id);
       for (const c of arr(g.combos)) {
-        if (!c || !c.id || done.includes(c.id)) continue;
+        if (!c || !c.id) continue;
+        const have = s.find((x) => x.id === c.id);
+        if (have && Number(c.rev) > (Number(have.rev) || 1) && valid(c)) {
+          const keep = { name: have.name, enabled: have.enabled !== false, deckId: d.id, deckName: d.name };
+          Object.keys(have).forEach((k) => { delete have[k]; });
+          Object.assign(have, copy(c), keep);
+          n++;
+          continue;
+        }
+        if (done.includes(c.id)) continue;
         done.push(c.id);
         if (!valid(c) || s.some((x) => x.id === c.id) || s.length >= CAP) continue;
         s.push(Object.assign(copy(c), { deckId: d.id, deckName: d.name }));
