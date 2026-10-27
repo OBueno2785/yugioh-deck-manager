@@ -1,11 +1,13 @@
-/* Navegación entre Constructor, Prueba de mano, Campo y Combos (con #constructor, #mano, #campo, #combos). */
+/* Navegación entre Constructor, Prueba de mano, Campo, Combos y Tableros (con #constructor, #mano, #campo, #combos, #tableros). */
 (function () {
   const YGO = window.YGO;
-  const MODES = ['constructor', 'mano', 'campo', 'combos'];
+  const MODES = ['constructor', 'mano', 'campo', 'combos', 'tableros'];
 
   function route(want) {
     const h = typeof want === 'string' ? want : location.hash.replace('#', '');
     const mode = MODES.includes(h) ? h : 'constructor';
+    // (las notas de un tablero que estabas escribiendo se guardan al cambiar de pestaña)
+    if (YGO.boardlab) YGO.boardlab.leave();
     document.body.dataset.mode = mode;
     document.querySelectorAll('.mode-pane').forEach((el) => { el.hidden = el.dataset.mode !== mode; });
     document.querySelectorAll('.modes .mode').forEach((a) => {
@@ -22,6 +24,7 @@
     if (mode === 'mano') YGO.handtest.enter();
     if (mode === 'campo') YGO.field.enter();
     if (mode === 'combos' && YGO.combolab) YGO.combolab.enter();
+    if (mode === 'tableros' && YGO.boardlab) YGO.boardlab.enter();
   }
 
   // Al cambiar de modo dentro del visor no siempre llega hashchange; se maneja el clic directamente

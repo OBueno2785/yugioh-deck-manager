@@ -1,4 +1,4 @@
-/* Copia de seguridad: tus mazos y tus combos grabados en un archivo (o un texto) que restauras en este navegador o en
+/* Copia de seguridad: tus mazos, tus combos grabados y tus tableros guardados en un archivo (o un texto) que restauras en este navegador o en
  * otro equipo, y el pedido al navegador de no borrar lo guardado. La app no tiene cuentas: todo vive en el navegador
  * (localStorage) y la copia es la forma de llevarlo a otro lado o de recuperarlo si se borran los datos.
  * Expone window.YGO.backup. Lo usa js/deckbuilder.js (botones Guardar y Copia de seguridad del constructor). */
@@ -17,8 +17,9 @@
   };
   const nameKey = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const C = () => YGO.combos || null;
+  const TB = () => YGO.boards || null;
 
-  /** La copia de esos mazos: { app, v, savedAt, decks, combos: { deckId: [combo] }, cards, aliases, names } */
+  /** La copia de esos mazos: { app, v, savedAt, decks, combos: { deckId: [combo] }, boards: { deckId: [tablero] }, cards, aliases, names } */
   function make(decks) {
     const list = arr(decks).filter(obj).map(copy);
     const c = C();
@@ -26,6 +27,7 @@
       app: APP, v: V, savedAt: new Date().toISOString(),
       decks: list,
       combos: c ? c.exportFor(list.map((d) => d.id)) : {},
+      boards: TB() ? TB().exportFor(list.map((d) => d.id)) : {},
       // Cartas que este navegador bajó de YGOPRODeck (las nuevas que no trae la base incluida): sin ellas, otro equipo sin
       // conexión no las conoce
       cards: arr(readKey(KEYS.cards, [])),
@@ -34,10 +36,11 @@
     };
   }
   const toText = (b) => JSON.stringify(b);
-  /** Cuántos mazos y combos trae → { decks, combos } */
+  /** Cuántos mazos, combos y tableros trae → { decks, combos, boards } */
   const counts = (b) => ({
     decks: arr(b && b.decks).length,
     combos: Object.values(obj(b && b.combos) || {}).reduce((n, l) => n + arr(l).length, 0),
+    boards: Object.values(obj(b && b.boards) || {}).reduce((n, l) => n + arr(l).length, 0),
   });
   const pad = (n) => String(n).padStart(2, '0');
   /** simulador-yugioh-copia-2026-10-26.json */
@@ -65,7 +68,9 @@
     if (!decks.length) return { ok: false, why: 'La copia no trae mazos.' };
     const combos = {};
     for (const [k, l] of Object.entries(obj(v.combos) || {})) if (Array.isArray(l)) combos[k] = l;
-    return { ok: true, data: { savedAt: String(v.savedAt || ''), decks, combos, cards: arr(v.cards).filter(Array.isArray),
+    const boards = {};
+    for (const [k, l] of Object.entries(obj(v.boards) || {})) if (Array.isArray(l)) boards[k] = l;
+    return { ok: true, data: { savedAt: String(v.savedAt || ''), decks, combos, boards, cards: arr(v.cards).filter(Array.isArray),
       aliases: obj(v.aliases) || {}, names: obj(v.names) || {} } };
   }
 
@@ -86,8 +91,8 @@
     if (!Object.keys(o || {}).length) return;
     try { localStorage.setItem(k, JSON.stringify(Object.assign(obj(readKey(k, {})) || {}, o))); } catch (e) { /* sin almacenamiento */ }
   };
-  /** Restaura → { list (la lista nueva de mazos), decks (los de la copia, ya en la lista), combos (cuántos se sumaron),
-   * unsaved (el navegador no dejó guardar los combos) }. Los demás mazos no cambian. */
+  /** Restaura → { list (la lista nueva de mazos), decks (los de la copia, ya en la lista), combos y boards (cuántos se
+   * sumaron), unsaved (el navegador no dejó guardar los combos o los tableros) }. Los demás mazos no cambian. */
   function apply(local, data, p) {
     p = p || plan(local, data);
     // Primero las cartas bajadas de YGOPRODeck: los mazos las usan
@@ -96,7 +101,7 @@
     mergeKey(KEYS.names, data.names);
     const list = arr(local).slice();
     const out = [];
-    let combos = 0, unsaved = false;
+    let combos = 0, boards = 0, unsaved = false;
     for (const it of p.items) {
       const d = store.clean(Object.assign(copy(it.inc), { updated: Date.now() }));
       if (it.local) { d.id = it.local.id; list[list.indexOf(it.local)] = d; }
@@ -108,8 +113,10 @@
       const c = C();
       const cl = arr(data.combos[it.inc.id]);
       if (c && cl.length) { const r = c.importFor(d.id, cl); combos += r.added; unsaved = unsaved || r.unsaved; }
+      const bl = arr(obj(data.boards) && data.boards[it.inc.id]);
+      if (TB() && bl.length) { const r = TB().importFor(d.id, bl); boards += r.added; unsaved = unsaved || r.unsaved; }
     }
-    return { list, decks: out, combos, unsaved };
+    return { list, decks: out, combos, boards, unsaved };
   }
 
   /** Pide al navegador que no borre lo guardado aunque le falte espacio → 'yes' | 'no' | 'unsupported' */

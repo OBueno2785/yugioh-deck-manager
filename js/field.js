@@ -4756,6 +4756,13 @@
       if (typeof S.opp.seed === 'number') cfg.bot.seed = S.opp.seed;
     }
     if (!st || st.deckId !== d.id) { newDuel(null, null, cfg); return; }
+    // Un tablero cargado: Reiniciar lo vuelve a poner (si lo borraste, una mano nueva)
+    if (st.board) {
+      const b = boardsReady() ? boardsCall('get', [st.board], null) : null;
+      if (b) { newDuel([], [], { second: !!st.second, exactHand: true, bot: { enabled: false } }); putBoard(b); return; }
+      newDuel(null, null, { second: !!st.second, bot: cfg.bot });
+      return;
+    }
     let hand = st.hand.slice();
     if (!cfg.second && st.second && !st.exactHand) hand = hand.slice(0, 5);
     // La mano de un combo (Reproducir / Practicar) sigue siendo solo esa, también al cambiar a segundo
@@ -4790,6 +4797,8 @@
     const b = $('#fd-rec');
     if (!b) return;
     b.hidden = !combosReady() || isVs();
+    const bb = $('#fd-board');
+    if (bb) bb.hidden = !boardsReady() || isVs();
     const n = rec ? Math.max(0, histBase + history.length - rec.start) : 0;
     b.classList.toggle('rec-on', !!rec);
     b.textContent = rec ? 'Terminar (' + n + ')' : 'Grabar combo';
@@ -4872,6 +4881,79 @@
       ], openCombos);
     }));
   }
+  /* ---------- Tableros guardados (js/boards.js, pestaña Tableros) ----------
+   * Pedido de Oscar (2026-10-27): "quiero la opción de poder grabar tableros para revisarlos luego y analizar las opciones".
+   * «Guardar tablero» (Prueba) guarda tu lado tal como está. «Cargar en el campo» (pestaña Tableros) lo vuelve a poner en
+   * Prueba sin rival de handtraps, para probar desde ahí (Pasar turno lleva al turno del rival); Reiniciar lo vuelve a poner. */
+  const boardsCall = (name, args, fallback) => modCall('boards', name, args, fallback);
+  const boardsReady = () => !!(window.YGO.boards && typeof window.YGO.boards.capture === 'function');
+  function openSaveBoard() {
+    if (!S || !d || !boardsReady() || isVs()) return;
+    if (pending) { toast('Termina la jugada que tienes a medias antes de guardar el tablero.', 'warn'); return; }
+    if (arr(S.chain).length) { toast('Resuelve la cadena antes de guardar el tablero.', 'warn'); return; }
+    const n = Number(boardsCall('count', [d.id], 0)) || 0;
+    const def = play && play.end && !play.why ? 'Campo final · ' + play.combo.name : 'Tablero ' + (n + 1);
+    const meta = () => ({ deckId: d.id, deckName: d.name, second: !!(S.start ? S.start.second : S.turnState.turn === 2) });
+    const sumTxt = String(boardsCall('summary', [boardsCall('capture', [S, meta()], { state: { zones: {} } })], '') || '');
+    const body = '<label class="field"><span>Nombre</span><input id="bd-name" type="text" maxlength="80" value="' + esc(def) + '"></label>'
+      + '<label class="field"><span>Notas (opcional)</span><textarea id="bd-notes" rows="3" maxlength="4000" placeholder="Qué querías probar, qué te preocupa del rival, qué cambiarías..."></textarea></label>'
+      + '<p class="hint">Se guarda tu lado tal como está' + (sumTxt ? ' (' + esc(sumTxt) + ')' : '') + ': campo, mano, Cementerio, desterradas, Mazo, LP, turno y fase.'
+      + ' Lo revisas en la pestaña <b>Tableros</b> y desde ahí lo vuelves a cargar en el campo.</p>';
+    const go = () => {
+      const name = String(($('#bd-name') || {}).value || '').trim() || def;
+      const notes = String(($('#bd-notes') || {}).value || '');
+      const b = boardsCall('capture', [S, Object.assign(meta(), { name, notes })], null);
+      const saved = b ? boardsCall('add', [b], null) : null;
+      if (!saved) { toast('No se pudo guardar el tablero', 'bad'); return; }
+      toast(saved.unsaved ? 'El navegador no dejó guardarlo: queda hasta que cierres la página' : 'Tablero guardado: lo ves en la pestaña Tableros', saved.unsaved ? 'warn' : 'ok');
+      // (la pestaña Tableros abre en este)
+      if (window.YGO.boardlab && typeof window.YGO.boardlab.show === 'function') window.YGO.boardlab.show(d.id, saved.id);
+      pushLog({ kind: 'auto', text: 'Guardaste el tablero ' + q(saved.name) });
+      render();
+    };
+    openDialog('Guardar tablero', body, [{ label: 'Cancelar' }, { label: 'Guardar', kind: 'primary', action: go }]);
+    const inp = $('#bd-name');
+    if (inp) {
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); const b = $('#modal-foot .primary'); if (b) b.click(); } });
+      setTimeout(() => { inp.focus(); inp.select(); }, 40);
+    }
+  }
+  /** Tu lado como en el tablero (sobre el duelo nuevo que acaba de empezar). */
+  function putBoard(board) {
+    const r = boardsCall('restore', [board, () => game.instance(0).uid], null);
+    if (!r) return false;
+    FIELD_ZONES.forEach((z) => { S.zones[z] = arr(r.zones[z]); });
+    S.hand = arr(r.hand);
+    S.deck = game.shuffle(arr(r.deck));
+    S.extra = arr(r.extra);
+    S.gy = arr(r.gy);
+    S.ban = arr(r.ban);
+    S.lp = r.lp;
+    S.turnDraws = r.turnDraws;
+    S.turnState = Object.assign(newTurnState({ second: !!board.second }), r.turnState);
+    S.chain = [];
+    S.log = [];
+    logSeen = 0;
+    history = [];
+    histBase = 0;
+    selected = null;
+    pending = null;
+    S.start = { deckId: d.id, hand: [], second: !!board.second, exactHand: true, board: board.id, bot: { enabled: false } };
+    ensureState();
+    pushLog({ kind: 'auto', text: 'Tablero ' + q(board.name) + ': tu lado como lo guardaste (turno ' + S.turnState.turn + ', ' + phaseName(S.turnState.phase) + ')' });
+    S.setupLog = S.log.length;
+    render();
+    return true;
+  }
+  /** Pone un tablero guardado (de deckObj) en el campo, en Prueba y sin rival de handtraps. → false si no se pudo */
+  function loadBoard(deckObj, board) {
+    if (!deckObj || !board || !boardsReady() || !boardsCall('valid', [board], false)) return false;
+    stopPlay();
+    if (load(deckObj, [], [], { second: !!board.second, exactHand: true, bot: { enabled: false } }) === false) return false;
+    if (isVs()) return false;
+    return putBoard(board);
+  }
+
   /* ---------- Reproducir un combo ----------
    * Pedido de Oscar (2026-10-26): ver un combo grabado jugarse solo en tu campo. Empieza un duelo de Prueba solo con la mano
    * del combo (Oscar: "los combos son one card combos, deben iniciar solo con la carta inicial de mano"; el resto queda en el
@@ -5406,6 +5488,7 @@
     $$('#fd-order button').forEach((b) => b.addEventListener('click', () => {
       const second = b.dataset.order === 'second';
       if (!S || !!(S.start && S.start.second) === second) return;
+      if (S.start && S.start.board) { toast('Es un tablero guardado: queda como lo guardaste (Reiniciar lo vuelve a poner).', 'warn'); return; }
       confirmRestart(() => {
         savePref({ fieldSecond: second });
         const recOn = restartKeepingRec(() => restartSameHand({ second, keepBot: true }));
@@ -5449,6 +5532,7 @@
     $('#fd-end').addEventListener('click', () => endAttempt());
     // Grabar combo (Prueba): la lista del mazo y grabar uno nuevo; mientras graba, terminar y guardar
     { const rb = $('#fd-rec'); if (rb) rb.addEventListener('click', () => { if (rec) finishRec(); else openCombos(); }); }
+    { const bb = $('#fd-board'); if (bb) bb.addEventListener('click', openSaveBoard); }
     // Prueba / VS: la ventana "Nuevo duelo" con ese tipo elegido (nada cambia hasta Empezar)
     $$('#fd-vmode [data-vmode]').forEach((b) => b.addEventListener('click', () => {
       // En línea: la sala (crear o unirse) la maneja js/pvp.js
@@ -5729,6 +5813,6 @@
   };
   // openCombos: la ventana "Combos para el CPU" (la abre la sección Combos al ir a grabar uno nuevo)
   // replay(mazo, combo): reproduce un combo grabado en el campo (la sección Combos)
-  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port, openCombos, replay,
+  window.YGO.field = { enter, load, state: () => (S ? JSON.parse(JSON.stringify(S)) : null), testOps, port, openCombos, replay, loadBoard, saveBoard: openSaveBoard,
     playing: () => (play ? { id: play.combo.id, n: play.n, total: play.combo.steps.length, paused: play.paused, end: play.end, why: play.why } : null) };
 })();

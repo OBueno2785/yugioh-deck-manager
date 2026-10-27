@@ -318,7 +318,8 @@
     const k = backup.counts(data);
     backup.prefetch();
     modal('Copia de seguridad', '<p>Un archivo con tus <b>' + plural(k.decks, 'mazo', 'mazos') + '</b>'
-      + (k.combos ? ' y tus <b>' + plural(k.combos, 'combo grabado', 'combos grabados') + '</b>' : '')
+      + (k.combos ? (k.boards ? ', tus <b>' : ' y tus <b>') + plural(k.combos, 'combo grabado', 'combos grabados') + '</b>' : '')
+      + (k.boards ? ' y tus <b>' + plural(k.boards, 'tablero guardado', 'tableros guardados') + '</b>' : '')
       + '. Con él los recuperas si se borran los datos de este navegador, o los pasas a otro equipo (el sitio o claude.ai): ahí tocas <b>Restaurar copia</b>.</p>'
       + '<p class="hint">Guárdalo donde no se pierda (Drive, correo, un chat contigo). Si no se descarga, usa <b>Copiar texto</b> y pégalo en una nota.</p>'
       + '<textarea id="m-backup" rows="5" readonly spellcheck="false" hidden aria-label="Texto de la copia"></textarea>', [
@@ -368,10 +369,11 @@
     const at = backup.when(data.savedAt);
     const names = (xs) => xs.map((x) => '<b>' + esc(x.inc.name) + '</b>').join(', ');
     modal('Restaurar copia', '<p>La copia' + (at ? ' del ' + esc(at) : '') + ' trae ' + plural(k.decks, 'mazo', 'mazos')
-      + (k.combos ? ' y ' + plural(k.combos, 'combo grabado', 'combos grabados') : '') + '.</p>'
+      + (k.combos ? (k.boards ? ', ' : ' y ') + plural(k.combos, 'combo grabado', 'combos grabados') : '')
+      + (k.boards ? ' y ' + plural(k.boards, 'tablero guardado', 'tableros guardados') : '') + '.</p>'
       + (p.replace.length ? '<p>Se reemplazan (el mismo mazo o el mismo nombre): ' + names(p.replace) + '.</p>' : '')
       + (p.add.length ? '<p>Se agregan: ' + names(p.add) + '.</p>' : '')
-      + '<p class="hint">Tus otros mazos no cambian. Los combos se suman a los que ya tenías.</p>', [
+      + '<p class="hint">Tus otros mazos no cambian. Los combos y los tableros se suman a los que ya tenías.</p>', [
       { label: 'Cancelar' },
       { label: 'Restaurar', kind: 'primary', action: () => {
         const out = backup.apply(decks, data, p);
@@ -381,7 +383,7 @@
         commit();
         const what = [p.replace.length ? plural(p.replace.length, 'mazo reemplazado', 'mazos reemplazados') : '',
           p.add.length ? plural(p.add.length, 'mazo agregado', 'mazos agregados') : '',
-          out.combos ? plural(out.combos, 'combo', 'combos') : ''].filter(Boolean).join(', ');
+          out.combos ? plural(out.combos, 'combo', 'combos') : '', out.boards ? plural(out.boards, 'tablero', 'tableros') : ''].filter(Boolean).join(', ');
         if (saveOk === false || out.unsaved) toast('Copia restaurada (' + what + '), pero este navegador no la guarda: dura hasta que cierres la página', 'warn');
         else toast('Copia restaurada: ' + what, 'ok');
       } },

@@ -19,6 +19,7 @@
       <a class="mode" href="#mano">Prueba de mano</a>
       <a class="mode" href="#campo">Campo</a>
       <a class="mode" href="#combos">Combos</a>
+      <a class="mode" href="#tableros">Tableros</a>
     </nav>
     <p class="db-info"><span id="db-count">0</span> cartas · banlist <span id="banlist-name">TCG</span><span id="online-badge" class="online-badge" hidden title="Conectado a YGOPRODeck: imágenes y cartas nuevas">YGOPRODeck</span></p>
   </header>
@@ -177,6 +178,22 @@
     <section id="cl-view" class="cl-view" aria-label="Combo elegido"></section>
   </main>
 
+  <main class="combolab boardlab mode-pane" data-mode="tableros" hidden>
+    <aside class="panel cl-side" aria-label="Tableros guardados del mazo">
+      <div class="toolrow">
+        <label class="sr" for="bl-deck">Mazo</label>
+        <select id="bl-deck" class="deck-select"></select>
+      </div>
+      <p id="bl-sum" class="cl-sum"></p>
+      <ul id="bl-list" class="cl-list" aria-label="Tableros"></ul>
+      <div class="cl-side-foot">
+        <button id="bl-field" type="button" class="go">Armar un tablero en el campo →</button>
+        <p class="hint">En Campo → Prueba, «Guardar tablero» guarda tu lado tal como está para revisarlo aquí.</p>
+      </div>
+    </aside>
+    <section id="bl-view" class="cl-view" aria-label="Tablero elegido"></section>
+  </main>
+
   <main class="fieldmode mode-pane" data-mode="campo" hidden>
     <section class="fd-main">
       <div class="toolrow">
@@ -207,6 +224,7 @@
             <button id="fd-pass" type="button">Pasar turno</button>
             <button id="fd-reset" type="button" title="Vuelve al principio con la misma mano (y las mismas handtraps del rival)">Reiniciar</button>
             <button id="fd-rec" type="button" class="rec-btn" hidden>Grabar combo</button>
+            <button id="fd-board" type="button" title="Guarda tu lado del campo para revisarlo en la pestaña Tableros" hidden>Guardar tablero</button>
             <button id="fd-concede" type="button" hidden>Rendirse</button>
             <button id="fd-end" type="button" class="end-btn" title="Guarda el intento y muestra el resumen" hidden>Terminar intento</button>
             <button id="fd-log-btn" type="button" class="log-btn">Registro (0)</button>
@@ -276,6 +294,7 @@
 <script src="js/duel.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/combos.js"></script>
+<script src="js/boards.js"></script>
 <script src="js/vsview.js"></script>
 <script src="js/deckbuilder.js"></script>
 <script src="js/handtest.js"></script>
@@ -286,6 +305,7 @@
 <script src="js/net.js"></script>
 <script src="js/pvp.js"></script>
 <script src="js/combolab.js"></script>
+<script src="js/boardlab.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
