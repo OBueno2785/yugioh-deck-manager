@@ -18,30 +18,24 @@
 
   const decks = () => window.YGO.builder.decks();
 
-  /* Roles de carta: ★ Starter (se guarda en mazo.starters, lo usa también el rival con handtraps), Extender, Handtrap y
-   * Ladrillo (carta que no quieres abrir). Los otros tres van en mazo.roles = { código: 'extender' | 'handtrap' | 'brick' }. */
+  /* Roles de carta: ★ Starter (se guarda en mazo.starters, lo usa también el rival con handtraps), Starter 1,5 (necesita otra
+   * carta), Pieza de combo (con su pareja), Extender, Handtrap y Ladrillo (carta que no quieres abrir). Los demás van en
+   * mazo.roles = { código: rol }; las etiquetas avanzadas (⋯) en mazo.tags y los pares revisados en mazo.pairs (ver
+   * js/playability.js y el panel Jugadas de js/playlab.js). */
   const ROLES = [
     { k: 'starter', short: '★', label: 'Starter' },
+    { k: 'starter15', short: '★½', label: 'Starter 1,5' },
+    { k: 'combo2', short: 'C2', label: 'Pieza de combo', many: 'Piezas de combo' },
     { k: 'extender', short: 'E', label: 'Extender' },
     { k: 'handtrap', short: 'H', label: 'Handtrap' },
     { k: 'brick', short: 'L', label: 'Ladrillo' },
   ];
   const ROLE = Object.fromEntries(ROLES.map((r) => [r.k, r]));
-  function roleOf(id) {
-    if ((d.starters || []).includes(id)) return 'starter';
-    const r = d.roles && d.roles[id];
-    return ROLE[r] && r !== 'starter' ? r : '';
-  }
-  function setRole(id, role) {
-    d.starters = (d.starters || []).filter((x) => x !== id);
-    d.roles = Object.assign({}, d.roles);
-    delete d.roles[id];
-    if (role === 'starter') d.starters.push(id);
-    else if (ROLE[role]) d.roles[id] = role;
-  }
-  /** Cuenta los roles de una lista de códigos → { starter, extender, handtrap, brick } */
+  const roleOf = (id) => window.YGO.play.roleOf(d, id);
+  const setRole = (id, role) => window.YGO.play.setRole(d, id, role);
+  /** Cuenta los roles de una lista de códigos → { starter, starter15, combo2, extender, handtrap, brick } */
   function roleCounts(list) {
-    const out = { starter: 0, extender: 0, handtrap: 0, brick: 0 };
+    const out = Object.fromEntries(ROLES.map((r) => [r.k, 0]));
     for (const id of list) { const r = roleOf(id); if (r) out[r]++; }
     return out;
   }
@@ -154,7 +148,9 @@
     $('#ht-deck-n').textContent = N;
 
     renderStats(N, n);
+    if (window.YGO.playlab) window.YGO.playlab.render($('#ht-plays'), d, hand, n, PLAY_HOOKS);
   }
+  const PLAY_HOOKS = { persist: () => window.YGO.builder.persist(), showCard: (id) => showCard(id) };
 
   function roleBadge(id) {
     const r = roleOf(id);
@@ -166,7 +162,14 @@
       + '<select id="role-' + id + '" class="role-pick' + (r ? ' r-' + r : '') + '" title="Rol de la carta">'
       + '<option value="">—</option>'
       + ROLES.map((x) => '<option value="' + x.k + '"' + (x.k === r ? ' selected' : '') + '>' + x.short + ' ' + x.label + '</option>').join('')
-      + '</select>';
+      + '</select>' + tagsBtn(id, c);
+  }
+  /** ⋯ Etiquetas de la carta (panel Jugadas): debajo del rol, para no ensanchar la tabla */
+  function tagsBtn(id, c) {
+    if (!window.YGO.playlab) return '';
+    const tags = d.tags && d.tags[id] && Object.keys(d.tags[id]).length;
+    return '<button type="button" class="ht-tags' + (tags ? ' has' : '') + '" id="tags-' + id + '" title="Etiquetas: rol, Invocación Normal, parejas de combo, qué anula un ladrillo"'
+      + ' aria-label="Etiquetas de ' + esc(c.name) + (tags ? ' (tiene etiquetas)' : '') + '"><span aria-hidden="true">⋯<span class="ht-tags-w"> Etiquetas</span>' + (tags ? ' ●' : '') + '</span></button>';
   }
 
   /* Probabilidades por rol, para ir primero (5) y segundo (6). Grupos disjuntos: [starter, extender, handtrap, brick].
@@ -282,7 +285,7 @@
     }
     return '<header class="gx-head"><h3>Consistencia</h3><span class="gx-mode">' + (n === 5 ? 'Yendo primero · mano de 5' : 'Yendo segundo · mano de 6') + '</span>'
       + (any ? '<p class="roles-line gx-roles">' + ROLES.filter((r) => tot[r.k]).map((r) => '<span>' + badge(r.k) + ' <b>' + tot[r.k] + '</b> '
-        + r.label.toLowerCase() + (tot[r.k] === 1 ? '' : 's') + '</span>').join('') + '<span>en <b>' + N + '</b> cartas</span></p>' : '')
+        + (tot[r.k] === 1 ? r.label : r.many || r.label + 's').toLowerCase() + '</span>').join('') + '<span>en <b>' + N + '</b> cartas</span></p>' : '')
       + '</header>' + deck;
   }
 
@@ -501,6 +504,8 @@
         + '<div class="gx-card gx-locked">' + seal('?', 'Sin rango todavía') + '<div><p><b>Desbloquea el rango de tu mazo.</b> Marca el rol de tus cartas en la lista '
         + '(columna <b>Rol</b>): aquí verás tu rango, tus medallas y la probabilidad exacta de cada mano, yendo primero y segundo.</p>'
         + '<ul class="gx-rolelist"><li>' + badge('starter') + '<span><b>★ Starter</b>: empieza tu combo (da el rango)</span></li>'
+        + '<li>' + badge('starter15') + '<span><b>Starter 1,5</b>: empieza tu combo si abres además lo que necesita</span></li>'
+        + '<li>' + badge('combo2') + '<span><b>Pieza de combo</b>: es jugada con su pareja</span></li>'
         + '<li>' + badge('extender') + '<span><b>Extender</b>: lo alarga</span></li>'
         + '<li>' + badge('handtrap') + '<span><b>Handtrap</b>: interrumpe al rival desde la mano</span></li>'
         + '<li>' + badge('brick') + '<span><b>Ladrillo</b>: carta que no quieres abrir</span></li></ul></div></div>'
@@ -620,6 +625,18 @@
       if (ns && ns !== document.activeElement) ns.focus();
     });
     $('#ht-mark-ht').addEventListener('click', markHandtraps);
+    // Etiquetas avanzadas de una carta (⋯ en la columna Rol)
+    $('#ht-rows').addEventListener('click', (e) => {
+      const b = e.target.closest('.ht-tags');
+      if (!b || !window.YGO.playlab) return;
+      const id = Number(b.closest('tr[data-id]').dataset.id);
+      window.YGO.playlab.editTags(d, id, { saved: () => {
+        window.YGO.builder.persist();
+        render();
+        const nb = document.getElementById('tags-' + id);
+        if (nb) nb.focus();
+      } });
+    });
     // Consistencia: ver como Medallas o Tabla (el panel se redibuja: el foco vuelve al botón)
     $('#ht-stats').addEventListener('click', (e) => {
       const b = e.target.closest('[data-view]');

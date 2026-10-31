@@ -62,6 +62,9 @@
       const out = Object.assign({}, d, { name: String(d.name || 'Mazo').slice(0, 60) });
       for (const s of SECTIONS) out[s] = arr(d[s]).map(Number).filter((x) => Number.isInteger(x) && x > 0);
       if (!obj(d.roles)) delete out.roles;
+      // Etiquetas avanzadas y pares revisados del panel Jugadas (js/playability.js)
+      if (!obj(d.tags)) delete out.tags;
+      if (!obj(d.pairs)) delete out.pairs;
       if (!Array.isArray(d.pending)) delete out.pending;
       return out;
     });

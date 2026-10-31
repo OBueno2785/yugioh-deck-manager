@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Cinzel:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="css/style.css?v=397a7b9f66">
+<link rel="stylesheet" href="css/style.css?v=1afe148004">
 </head>
 <body>
 <div class="app" data-mode="builder">
@@ -144,13 +144,14 @@
         <div id="ht-hand" class="ht-hand"></div>
       </div>
       <div id="ht-stats" class="ht-stats"></div>
+      <div id="ht-plays" class="ht-stats ht-plays" hidden></div>
       <p id="ht-live" class="sr" role="status"></p>
     </section>
     <aside class="panel ht-list">
       <header class="ht-list-head">
         <div class="ht-list-title"><h3>Mazo principal · <span id="ht-deck-n">0</span></h3>
           <button id="ht-mark-ht" type="button" class="small" title="Marca como Handtrap las handtraps conocidas que todavía no tienen rol">Marcar handtraps</button></div>
-        <p class="hint">Usa <b>+</b> y <b>−</b> para elegir exactamente qué cartas tienes en mano. En <b>Rol</b> marca tus starters (★), extenders, handtraps y ladrillos.
+        <p class="hint">Usa <b>+</b> y <b>−</b> para elegir exactamente qué cartas tienes en mano. En <b>Rol</b> marca tus starters (★), extenders, handtraps y ladrillos; con <b>⋯</b>, lo que necesita cada starter, sus parejas de combo y qué anula un ladrillo.
           <span class="kbd-hint">Atajos: <kbd>R</kbd> robar mano · <kbd>1</kbd> robar 1.</span></p>
       </header>
       <div class="ht-table-wrap">
@@ -284,10 +285,11 @@
 <script src="js/preset-combos.js?v=4f2ea6d1fd"></script>
 <script src="js/carddb.js?v=6bbcb3509b"></script>
 <script src="js/deck.js?v=b322424576"></script>
-<script src="js/backup.js?v=8d24900f1a"></script>
+<script src="js/backup.js?v=4656160e0b"></script>
 <script src="js/cardview.js?v=17253a4743"></script>
 <script src="js/online.js?v=ebb58b211c"></script>
 <script src="js/game.js?v=5e9d0b5c9c"></script>
+<script src="js/playability.js?v=eeab114bfb"></script>
 <script src="js/rules.js?v=65950107a8"></script>
 <script src="js/effects.js?v=81b7dd107c"></script>
 <script src="js/bot.js?v=ecdff8a14c"></script>
@@ -297,7 +299,8 @@
 <script src="js/boards.js?v=ba83a76542"></script>
 <script src="js/vsview.js?v=9d027decc5"></script>
 <script src="js/deckbuilder.js?v=ae69bc1483"></script>
-<script src="js/handtest.js?v=2a0b048dc9"></script>
+<script src="js/handtest.js?v=261e9309cf"></script>
+<script src="js/playlab.js?v=fe4252f9ce"></script>
 <script src="js/attempts.js?v=37c0559fba"></script>
 <script src="js/field.js?v=43a02c2491"></script>
 <script src="js/vs.js?v=5850e03501"></script>
