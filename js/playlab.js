@@ -3,6 +3,8 @@
  * Gnurrgard y thedeckspace.com como referencia.
  * Muestra: jugable / ladrillo / 2 o más jugadas / jugadas en promedio, cuántas jugadas abres, por qué no abres jugada, cartas
  * muertas, eslabones débiles, Invocación Normal, torneo, «Revisar pares» y el tamaño del mazo con más no-motor.
+ * Los pares revisados no cambian «jugable» (con una jugada ya juegas) sino cuántas jugadas abres: el recuadro «Lo que cambiaron
+ * tus pares» compara con no revisar ninguno, y cada toque en un par dice qué movió (pedido de Oscar 2026-10-31: «falta conectar»).
  * Expone window.YGO.playlab = { render, editTags }. Lo llama js/handtest.js. */
 (function () {
   const YGO = window.YGO;
@@ -16,6 +18,7 @@
   const PAIRS_SHOWN = 12;
   let allPairs = false, openPairs = false, openSize = false;
   let ctx = null; // { box, d, hand, n, hooks } del último dibujo
+  let lastFx = null; // { key, a, b, v, before, after }: el último par tocado y lo que movió
   const memo = new Map();
 
   const pc = (p) => (p <= 1e-12 ? '0%' : p >= 1 - 1e-9 ? '100%' : p < 0.0005 ? '<0,1%' : p >= 0.9995 ? '>99,9%' : game.pct(p));
@@ -55,6 +58,11 @@
     return v;
   }
   const analysisOf = (d, n) => cached(sig(d) + '#a' + n, () => { const m = P().model(d); return { m, a: P().analyze(m, n) }; });
+  /** La cuenta como si no hubieras revisado ningún par */
+  const rawOf = (d, n) => analysisOf(Object.assign({}, d, { pairs: undefined }), n).a;
+  /** Diferencia con signo: en puntos para un % (pc), tal cual para un promedio (dec) */
+  const delta = (x, f) => (x > 0 ? '+' : '−') + (f === pc ? dec(Math.abs(x) * 100) : dec(Math.abs(x)));
+  const move = (x, y, f) => f(x) === f(y) ? '<b>' + f(y) + '</b> (igual)' : f(x) + ' → <b>' + f(y) + '</b>';
 
   /* ---------- Panel ---------- */
   function render(box, d, hand, n, hooks) {
@@ -82,9 +90,9 @@
       + stats(a, b, n)
       + distBar(a)
       + handLine(d, m, hand, n)
-      + (pairs.length && pending ? '<p class="pl-warn">Te faltan <b>' + pending + ' de ' + plural(pairs.length, 'par', 'pares') + '</b> por revisar: sin revisar, dos starters distintos cuentan como dos jugadas aunque terminen en la misma carta que te cortan. Abre <b>Revisar pares</b>.</p>' : '')
+      + fxBox(d, n, a, pairs, pending)
       + '<div class="pl-grid">' + whyBox(a) + deadBox(a) + weakBox(a, pending) + nsBox(d, n) + tourBox(d) + '</div>'
-      + pairsBox(pairs, pending)
+      + pairsBox(d, n, pairs, pending)
       + sizeBox(d, n)
       + '</section>';
     if (focus) { const el = box.querySelector(focus); if (el) el.focus(); }
@@ -117,6 +125,25 @@
     if (!h.plays) return '<p class="pl-hand">Tu mano: <span class="bad">ladrillo</span> · ' + WHY[h.why][0].toLowerCase() + size + '</p>';
     return '<p class="pl-hand">Tu mano: <span class="good">' + plural(h.plays, 'jugada') + '</span>'
       + (h.sources.length ? ' · <span class="pl-src">' + h.sources.map((s) => esc(names(s))).join(' · ') + '</span>' : '') + size + '</p>';
+  }
+
+  /** Qué cambiaron los pares revisados frente a no revisar ninguno (o el aviso de revisarlos) */
+  function fxBox(d, n, a, pairs, pending) {
+    if (!pairs.length) return '';
+    const warn = '<b>' + pending + ' de ' + plural(pairs.length, 'par', 'pares') + '</b>';
+    if (pending === pairs.length) {
+      return '<p class="pl-warn">Te faltan ' + warn + ' por revisar: sin revisar, dos starters distintos cuentan como dos jugadas aunque terminen en la misma carta que te cortan. Abre <b>Revisar pares</b>.</p>';
+    }
+    const r = rawOf(d, n);
+    const same = Math.abs(r.pTwo - a.pTwo) < 1e-12 && Math.abs(r.avgPlays - a.avgPlays) < 1e-12;
+    const row = (label, x, y, f) => '<li><span>' + label + '</span><em>' + move(x, y, f) + (f(x) === f(y) ? '' : ' <small>' + delta(y - x, f) + '</small>') + '</em></li>';
+    return '<div class="pl-fx" data-k="pl-fx"><h5>Lo que cambiaron tus pares</h5>'
+      + '<p class="pl-note">' + (pairs.length - pending) + ' de ' + plural(pairs.length, 'par', 'pares') + ' revisados, comparado con no revisar ninguno (mano de ' + n + '):</p>'
+      + (same ? '<p class="pl-note">Las cifras quedan igual: marcaste cada par como la cuenta ya lo suponía (<b>2 jugadas</b>, o <b>1</b> si las dos usan la Invocación Normal). Solo cambian si dos cartas que no usan la Invocación Normal son <b>1 jugada</b>, o al revés.</p>'
+        : '<ul class="pl-rows pl-fxl">' + row('2 o más jugadas <small>aguantas 1 handtrap</small>', r.pTwo, a.pTwo, pc) + row('Una sola jugada <small>1 handtrap te para</small>', r.dist[1], a.dist[1], pc)
+          + row('Jugadas en promedio', r.avgPlays, a.avgPlays, dec) + '</ul>')
+      + '<p class="pl-note"><b>Jugable</b> (' + pc(a.pPlay) + ') y <b>ladrillo</b> no cambian con los pares: con una jugada ya juegas. Los pares dicen <b>cuántas handtraps aguantas</b>: cambian 2 o más jugadas, la barra, Eslabones débiles y, en Torneo, las partidas en que una handtrap te para.'
+      + (pending ? ' Te faltan ' + warn + ' por revisar.' : '') + '</p></div>';
   }
 
   function whyBox(a) {
@@ -154,16 +181,29 @@
   function tourBox(d) {
     const a5 = analysisOf(d, 5).a, a6 = analysisOf(d, 6).a;
     const r = P().tournament(1 - a5.pPlay, 1 - a6.pPlay, prefs.plRounds, prefs.plMode);
+    const one = P().tournament(a5.dist[0] + a5.dist[1], a6.dist[0] + a6.dist[1], prefs.plRounds, prefs.plMode);
     const rounds = Array.from({ length: 15 }, (_, i) => i + 1).map((x) => '<option value="' + x + '"' + (x === prefs.plRounds ? ' selected' : '') + '>' + x + '</option>').join('');
     const modes = [['prudente', 'Prudente: empiezas 2 de 3'], ['normal', 'Normal: empiezas la mitad'], ['optimista', 'Optimista: empiezas 1 de 3']]
       .map(([k, t]) => '<option value="' + k + '"' + (k === prefs.plMode ? ' selected' : '') + '>' + t + '</option>').join('');
     return '<div class="pl-box pl-tour"><h5>Torneo</h5>'
       + '<div class="pl-ctl"><label>Rondas <select id="pl-rounds">' + rounds + '</select></label><label><span class="sr">Cuántas partidas empiezas</span><select id="pl-mode">' + modes + '</select></label></div>'
       + '<p class="pl-big"><b>' + dec(r.expected) + '</b> partidas sin jugada en ' + plural(prefs.plRounds, 'ronda') + ' (' + r.games + ' partidas)</p>'
-      + '<p class="pl-note">Lo normal: entre <b>' + r.lo + '</b> y <b>' + r.hi + '</b>. Al menos una: <b>' + pc(r.pAny) + '</b>. Cada ronda son 3 partidas.</p></div>';
+      + '<p class="pl-note">Lo normal: entre <b>' + r.lo + '</b> y <b>' + r.hi + '</b>. Al menos una: <b>' + pc(r.pAny) + '</b>. Cada ronda son 3 partidas.</p>'
+      + '<p class="pl-big pl-one"><b>' + dec(one.expected) + '</b> con 1 jugada o ninguna: ahí una handtrap te para</p>'
+      + '<p class="pl-note">Lo normal: entre <b>' + one.lo + '</b> y <b>' + one.hi + '</b>. Esta cifra usa tus pares revisados.</p></div>';
   }
 
-  function pairsBox(pairs, pending) {
+  /** Lo que movió el último par tocado */
+  function fxNow(d, n) {
+    if (!lastFx || lastFx.key !== sig(d) + '#' + n) return '';
+    const f = lastFx, x = f.before, y = f.after;
+    const what = f.v ? '<b>' + plural(f.v, 'jugada') + '</b>' : '<b>sin revisar</b>';
+    const nothing = Math.abs(x.pTwo - y.pTwo) < 1e-12 && Math.abs(x.avgPlays - y.avgPlays) < 1e-12;
+    return '<p class="pl-fxnow" role="status">' + esc(nameOf(f.a)) + ' + ' + esc(nameOf(f.b)) + ': ' + what + '. '
+      + (nothing ? 'La cuenta no cambia: ya lo contaba así.' : '2 o más jugadas ' + move(x.pTwo, y.pTwo, pc) + ' · promedio ' + move(x.avgPlays, y.avgPlays, dec) + '.') + '</p>';
+  }
+
+  function pairsBox(d, n, pairs, pending) {
     if (!pairs.length) return '';
     const shown = allPairs ? pairs : pairs.slice(0, PAIRS_SHOWN);
     const rows = shown.map((x) => {
@@ -177,6 +217,7 @@
     }).join('');
     return '<details class="pl-pairs"' + (openPairs ? ' open' : '') + ' data-pl-open="pairs"><summary>Revisar pares · <b>' + (pairs.length - pending) + ' de ' + pairs.length + '</b> revisados</summary>'
       + '<p class="pl-note">Si abres las dos, ¿son <b>1 jugada</b> (las dos terminan en la misma carta: si te cortan esa, no tienes nada) o <b>2 jugadas</b> (si te cortan una, juegas con la otra)? Del par que más abres al que menos. Tocar otra vez lo deja sin revisar.</p>'
+      + fxNow(d, n)
       + '<ul class="pl-plist">' + rows + '</ul>'
       + (pairs.length > PAIRS_SHOWN ? '<button type="button" class="small" data-pl-all>' + (allPairs ? 'Ver solo los ' + PAIRS_SHOWN + ' que más abres' : 'Ver los ' + pairs.length + ' pares') + '</button>' : '')
       + '</details>';
@@ -258,8 +299,11 @@
       const pv = e.target.closest('[data-pv]');
       if (pv) {
         const v = Number(pv.dataset.pv), a = Number(pv.dataset.pa), b = Number(pv.dataset.pb);
-        P().setPair(ctx.d, a, b, P().pairLabel(ctx.d, a, b) === v ? 0 : v);
+        const before = analysisOf(ctx.d, ctx.n).a;
+        const nv = P().pairLabel(ctx.d, a, b) === v ? 0 : v;
+        P().setPair(ctx.d, a, b, nv);
         ctx.hooks.persist();
+        lastFx = { key: sig(ctx.d) + '#' + ctx.n, a, b, v: nv, before, after: analysisOf(ctx.d, ctx.n).a };
         rerender();
         return;
       }
