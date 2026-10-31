@@ -358,6 +358,7 @@ button.go:hover:not(:disabled) { background: rgba(226, 178, 74, .12); border-col
 .gx-hero-body { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .gx-big { font: 500 15px/1.25 var(--data); color: var(--muted); }
 .gx-nw { white-space: nowrap; }
+.gx-what { font-size: 13px; }
 .gx-big b { display: block; width: fit-content; font: 700 48px/1 var(--data); color: var(--accent); letter-spacing: -.01em; margin-bottom: 2px; font-variant-numeric: tabular-nums; border-radius: 4px; }
 .gx-freq { display: flex; flex-direction: column; gap: 6px; padding: 10px 0 2px; border-top: 1px dashed color-mix(in srgb, var(--accent) 22%, var(--line)); }
 .gx-freq p { font: 500 14px var(--data); color: var(--muted); text-align: center; }

@@ -122,7 +122,7 @@
     for (const [id, n] of counts) {
       if (single.has(id)) continue;
       const r = role.get(id);
-      const cls = r === 'brick' ? 'brick' : r === 'extender' ? 'extender' : 'other';
+      const cls = r === 'brick' ? 'brick' : r === 'extender' ? 'extender' : r === 'handtrap' ? 'handtrap' : 'other';
       const f = needFrame ? frame(id) : '';
       const key = 'g:' + cls + (f ? ':' + f : '');
       const g = groups.get(key) || { key, id: 0, count: 0, role: cls === 'other' ? '' : cls, group: cls, frame: f, links: new Set(), kills: new Set() };
@@ -146,10 +146,34 @@
     return { N, types: list, pairs, extra, index };
   }
 
-  /** Una mano concreta (códigos) → { plays, sources: [[ids]], dead, why } (why: por qué es ladrillo) */
-  function handPlays(m, ids) {
+  const handX = (m, ids) => {
     const x = new Array(m.types.length).fill(0);
     for (const id of ids) { const i = m.index.get(Number(id)); if (i != null) x[i]++; }
+    return x;
+  };
+  /** Lo que cuenta el panel Consistencia en una mano: [starters, extenders, handtraps, ladrillos]. Starters = copias de ★ y de
+   * Starter 1,5 con lo que necesitan (sin anular) y cada pareja de Piezas de combo */
+  function kOf(m, x, s) {
+    const k = [s.starters, 0, 0, 0];
+    m.types.forEach((t, i) => { if (x[i]) { if (t.role === 'extender') k[1] += x[i]; else if (t.role === 'handtrap') k[2] += x[i]; else if (t.role === 'brick') k[3] += x[i]; } });
+    return k;
+  }
+  /** Una mano concreta para el panel Consistencia → { k: [starters, extenders, handtraps, ladrillos], idle, killed } (idle:
+   * copias de Starter 1,5 sin lo que necesitan y Piezas de combo sin pareja; killed: piezas del motor anuladas por un ladrillo) */
+  function handCounts(m, ids) {
+    const x = handX(m, ids), s = sourcesOf(m, x);
+    return { k: kOf(m, x, s), idle: s.idle, killed: s.killed };
+  }
+  /** P(lo que pide ok([starters, extenders, handtraps, ladrillos])) con lo que juntó analyze */
+  function jointP(a, ok) {
+    let p = 0;
+    for (const [key, w] of a.joint) if (ok(key.split(',').map(Number))) p += w;
+    return p;
+  }
+
+  /** Una mano concreta (códigos) → { plays, sources: [[ids]], dead, why } (why: por qué es ladrillo) */
+  function handPlays(m, ids) {
+    const x = handX(m, ids);
     const s = sourcesOf(m, x);
     const plays = playCount(m, s.src);
     return { plays, sources: s.src.map((f) => f.ids.slice()), why: plays ? '' : s.anyCancelled ? 'cancel' : s.hasEngine ? 'incomplete' : s.bricks ? 'garnets' : 'empty' };
@@ -170,17 +194,19 @@
       if (t.frame) fr[t.frame] += x[i];
     }
     const src = [];
-    let anyCancelled = false;
+    let anyCancelled = false, starters = 0, idle = 0, killed = 0;
+    const inPair = new Set();
     for (let i = 0; i < T.length; i++) {
       const t = T[i];
       if (!x[i] || !ENGINE.has(t.role)) continue;
-      if (cancelled.has(t.id)) { anyCancelled = true; continue; }
+      if (cancelled.has(t.id)) { anyCancelled = true; killed += x[i]; continue; }
       if (t.role === 'starter15') {
         const ok = (t.selfOk && x[i] >= 2) || (t.req === 'cards' ? T.some((u, j) => j !== i && x[j] && t.needs.has(u.id))
           : t.req === 'engine' ? engineCards - x[i] >= 1 : fr[t.req] - (t.frame === t.req ? x[i] : 0) >= 1);
-        if (!ok) continue;
+        if (!ok) { idle += x[i]; continue; }
       }
       if (t.role === 'starter' || t.role === 'starter15') {
+        starters += x[i];
         const k = t.nopt ? x[i] : 1;
         for (let c = 0; c < k; c++) src.push({ ids: [t.id], ns: t.ns, copy: t.nopt, type: i });
         continue;
@@ -193,9 +219,12 @@
         if (!linked) continue;
         if (u.role === 'combo2' && j < i) continue; // la pareja ya se contó desde la otra pieza
         src.push({ ids: [t.id, u.id], ns: t.ns || (u.ns && ENGINE.has(u.role)), copy: false, type: i, other: j });
+        starters++;
+        inPair.add(t.id); inPair.add(u.id);
       }
     }
-    return { src, cancelled, anyCancelled, hasEngine, bricks };
+    for (let i = 0; i < T.length; i++) if (x[i] && T[i].role === 'combo2' && !cancelled.has(T[i].id) && !inPair.has(T[i].id)) idle += x[i];
+    return { src, cancelled, anyCancelled, hasEngine, bricks, starters, idle, killed };
   }
 
   /** ¿Dos fuentes son la misma jugada? Lo que marcaste en «Revisar pares» manda; si no, comparten carta o las dos usan la
@@ -238,7 +267,7 @@
     const base = lnC(N, n);
     const x = new Array(T.length).fill(0);
     const out = { n, N, pPlay: 0, dist: [0, 0, 0, 0], avgPlays: 0, pTwo: 0, deadDist: [0, 0, 0, 0], avgDead: 0,
-      breakdown: { empty: 0, garnets: 0, incomplete: 0, cancel: 0 }, cards: [] };
+      breakdown: { empty: 0, garnets: 0, incomplete: 0, cancel: 0 }, cards: [], joint: new Map() };
     const per = T.map(() => ({ pIn: 0, pPlay: 0, pOne: 0 }));
     let playsSum = 0, deadSum = 0;
     // Lo que queda después de cada tipo: corta las ramas que no pueden completar la mano
@@ -257,6 +286,8 @@
     function leaf(w) {
       const s = sourcesOf(m, x);
       const plays = playCount(m, s.src);
+      const jk = kOf(m, x, s).join(',');
+      out.joint.set(jk, (out.joint.get(jk) || 0) + w);
       out.dist[Math.min(3, plays)] += w;
       if (plays) { out.pPlay += w; playsSum += w * plays; if (plays >= 2) out.pTwo += w; }
       else out.breakdown[s.anyCancelled ? 'cancel' : s.hasEngine ? 'incomplete' : s.bricks ? 'garnets' : 'empty'] += w;
@@ -375,5 +406,5 @@
   }
 
   YGO.play = { ROLE_KEYS, ENGINE, REQS, MODES, MAX_DECK, pairKey, roleOf, setRole, tagsOf, setTags, pairLabel, setPair, model, analyze,
-    handPlays, pairs, pBoth, normalSummons, tournament, fillers, weakLinks, range95, _sourcesOf: sourcesOf, _playCount: playCount };
+    handPlays, handCounts, jointP, pairs, pBoth, normalSummons, tournament, fillers, weakLinks, range95, _sourcesOf: sourcesOf, _playCount: playCount };
 })();

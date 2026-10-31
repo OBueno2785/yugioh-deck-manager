@@ -24,7 +24,7 @@
    * js/playability.js y el panel Jugadas de js/playlab.js). */
   const ROLES = [
     { k: 'starter', short: '★', label: 'Starter' },
-    { k: 'starter15', short: '★½', label: 'Starter 1,5' },
+    { k: 'starter15', short: '★½', label: 'Starter 1,5', many: 'Starters 1,5' },
     { k: 'combo2', short: 'C2', label: 'Pieza de combo', many: 'Piezas de combo' },
     { k: 'extender', short: 'E', label: 'Extender' },
     { k: 'handtrap', short: 'H', label: 'Handtrap' },
@@ -186,6 +186,31 @@
   ];
   const kArr = (c) => [c.starter, c.extender, c.handtrap, c.brick];
 
+  /* Con Starter 1,5 o Piezas de combo en el mazo, «starter» cuenta lo mismo que una jugada del panel Jugadas (Oscar 2026-10-31:
+   * «falta agregar el % de las 1.5»): las copias de ★ y de ★½ con lo que necesitan, sin un ladrillo que las anule, y cada pareja
+   * de C2. Sale de la cuenta exacta de js/playability.js. Sin ★½ ni C2, la hipergeométrica de siempre.
+   * cons (del último dibujo) = { joint, K: cartas que pueden ser starter, p(n, ok): P(ok([s, e, h, l])), k(ids): [s, e, h, l] de
+   * una mano, hand(ids): además lo que quedó sin jugada } */
+  let cons = null;
+  function consOf(tot, N) {
+    const P = window.YGO.play, lab = window.YGO.playlab, groups = kArr(tot);
+    if (!(tot.starter15 || tot.combo2) || !P) {
+      return { joint: false, K: tot.starter, p: (n, ok) => game.pMulti(N, groups, n, ok), k: (ids) => kArr(roleCounts(ids)), hand: () => null };
+    }
+    const own = {};
+    const an = (n) => (lab ? lab.analysis(d, n) : (own[n] = own[n] || ((m) => ({ m, a: P.analyze(m, n) }))(P.model(d))));
+    return { joint: true, K: tot.starter + tot.starter15 + tot.combo2, p: (n, ok) => P.jointP(an(n).a, ok),
+      k: (ids) => P.handCounts(an(5).m, ids).k, hand: (ids) => P.handCounts(an(5).m, ids) };
+  }
+  /** Qué cuenta como starter cuando hay ★½ o C2: «★, ★½ con lo que necesita o pareja de C2» */
+  function starterWhat(tot) {
+    const p = [];
+    if (tot.starter) p.push('★');
+    if (tot.starter15) p.push('★½ con lo que necesita');
+    if (tot.combo2) p.push('pareja de C2');
+    return p.length > 1 ? p.slice(0, -1).join(', ') + ' o ' + p[p.length - 1] : p[0];
+  }
+
   /* ---------- Panel «Consistencia», como la pantalla de resultado de un juego ----------
    * Rango del mazo S·A·B·C·D (sale solo del % de abrir con starter), medallas por logro, cuántos starters abres (abanicos de
    * cartas), tu mano, y tus manos robadas con racha y suerte frente a lo esperado. Toda cifra se lee como texto; «Tabla» muestra
@@ -275,6 +300,15 @@
     return '';
   }
 
+  /** Con ★½ o C2: qué cuenta como starter (el margen de rankNote solo sale con ★) */
+  function jointNote(tot) {
+    const p = [];
+    if (tot.starter15) p.push('cada ★½ cuenta si abres además lo que necesita');
+    if (tot.combo2) p.push('cada pareja de C2 cuenta como un starter');
+    const kills = Object.values(d.tags || {}).some((t) => t && Array.isArray(t.kills) && t.kills.length);
+    return 'Como en <b>Jugadas</b>: ' + p.join('; ') + '.' + (kills ? ' Un ladrillo que anula al starter lo descuenta.' : '');
+  }
+
   /** Cabecera: para qué mano, cuántas cartas de cada rol y el canto del mazo (una franja por carta) */
   function header(tot, N, n) {
     const any = ROLES.some((r) => tot[r.k]);
@@ -290,25 +324,26 @@
   }
 
   /** El rango del mazo: sello, cifra grande, 10 manos, la otra mano y la escalera */
-  function hero(N, K, n, s1) {
+  function hero(N, K, n, s1, tot) {
     const [p, q] = bothSizes(n, s1.p5, s1.p6); // las mismas cifras que la fila de la tabla
     const rk = rankOf(p), rq = rankOf(q);
     return '<section class="gx-card gx-hero" aria-labelledby="gx-h-hero">'
       + '<h4 id="gx-h-hero">Rango del mazo · mano de ' + n + '</h4>'
       + '<div class="gx-hero-top">' + seal(rk.k, 'Rango ' + rk.k + ' (' + SCALE + ')', ' data-k="rank" data-v="' + (4 - RANKS.indexOf(rk)) + '"')
-      + '<div class="gx-hero-body"><p class="gx-big"><b data-k="p" data-v="' + pc(p) + '">' + pc(p) + '</b>de abrir con al menos un starter</p>'
+      + '<div class="gx-hero-body"><p class="gx-big"><b data-k="p" data-v="' + pc(p) + '">' + pc(p) + '</b>de abrir con al menos un starter'
+      + (cons.joint ? ' <span class="gx-what">(' + starterWhat(tot) + ')</span>' : '') + '</p>'
       + '<p class="gx-sub">' + (p < 1 - 1e-9 ? 'Sin starter: <b>' + oneIn(1 - p) + '</b> manos · ' : '') + '<span class="gx-nw">' + (n === 5 ? 'Yendo segundo' : 'Yendo primero') + ': <b>' + pc(q) + '</b>'
       + ' <span class="sr">rango </span><span class="gx-rk" title="Rango yendo ' + (n === 5 ? 'segundo' : 'primero') + '">' + rq.k + '</span></span></p></div></div>'
       + freq(p)
       + ladder(p)
-      + '<p class="gx-note" title="' + SCALE + '">' + rankNote(N, K, n, p) + '</p>'
+      + '<p class="gx-note" title="' + SCALE + '">' + (cons.joint ? jointNote(tot) : rankNote(N, K, n, p)) + '</p>'
       + '</section>';
   }
 
   /* Cuántos starters abres: abanicos de n cartas (starters boca arriba) sobre pilas tan altas como la probabilidad */
   const DIST_K = ['0', '1', '2', '3+'], DIST_W = ['ninguno', '1 starter', '2 starters', '3 o más'];
   function distOf(N, K, n) {
-    const d = [0, 1, 2].map((k) => game.pExactly(N, K, n, k));
+    const d = [0, 1, 2].map((k) => (cons.joint ? cons.p(n, (x) => x[0] === k) : game.pExactly(N, K, n, k)));
     d.push(Math.max(0, 1 - d[0] - d[1] - d[2]));
     return d;
   }
@@ -320,7 +355,7 @@
   }
   function roll(N, K, n, handK) {
     const d = distOf(N, K, n), o = distOf(N, K, n === 5 ? 6 : 5), max = Math.max(...d);
-    const hk = handK && hand.length === n ? Math.min(3, handK.starter) : -1;
+    const hk = handK && hand.length === n ? Math.min(3, handK[0]) : -1;
     const cols = d.map((p, i) => {
       const h = Math.max(3, (p / max) * 76).toFixed(1) + 'px';
       return '<div class="gx-dcol' + (i === 0 ? ' is-zero' : '') + (i === hk ? ' is-hand' : '') + '" data-k="d' + i + '" data-v="' + pc(p) + '" data-w="' + h + '">'
@@ -381,7 +416,7 @@
   }
   function achievements(ms, n, handK, heroShown) {
     const table = prefs.statsView === 'table';
-    const kk = handK && hand.length === n && kArr(handK); // ✓ solo si tu mano es de este tamaño
+    const kk = handK && hand.length === n && handK; // ✓ solo si tu mano es de este tamaño
     const tiles = ms.filter((m) => !(heroShown && m.id === 's1'));
     const pressed = (v) => ' aria-pressed="' + (prefs.statsView === v || (v === 'medals' && !table)) + '"';
     return '<section class="gx-ach" aria-labelledby="gx-h-ach">'
@@ -416,12 +451,13 @@
   }
   const VERDICT_MIN = 20;
   const CHIP = { s: ['★', 'con starter, sin ladrillos'], b: ['★', 'con starter y ladrillo'], x: ['–', 'sin starter'], d: ['☠', 'mano muerta'], o: ['·', 'robada'] };
-  function session(N, tot, groups) {
+  function session(N, tot) {
     const L = sims.log, H = L.length;
     if (!H) return '';
-    const deadOn = tot.starter > 0 && tot.handtrap > 0; // como la fila «Mano muerta»: hace falta marcar starters y handtraps
-    const ks = L.map((e) => kArr(roleCounts(e.ids)));
-    const code = (k) => (deadOn && !k[0] && !k[2] ? 'd' : !tot.starter ? 'o' : k[0] ? (tot.brick && k[3] ? 'b' : 's') : 'x');
+    const K = cons.K;
+    const deadOn = K > 0 && tot.handtrap > 0; // como la fila «Mano muerta»: hace falta marcar starters y handtraps
+    const ks = L.map((e) => cons.k(e.ids));
+    const code = (k) => (deadOn && !k[0] && !k[2] ? 'd' : !K ? 'o' : k[0] ? (tot.brick && k[3] ? 'b' : 's') : 'x');
     const codes = ks.map(code);
     const shown = L.slice(-20);
     const chips = shown.map((e, i) => {
@@ -429,11 +465,11 @@
       return '<li class="gx-chip c-' + c + (i === shown.length - 1 ? ' is-last' : '') + '" data-k="h-' + e.no + '" data-v="' + c + '">'
         + '<span aria-hidden="true">' + CHIP[c][0] + '</span><span class="sr">Mano ' + e.no + ': ' + CHIP[c][1] + '</span></li>';
     }).join('');
-    const legend = (tot.starter ? '<span><i class="c-s">★</i>con starter</span>' + (tot.brick ? '<span><i class="c-b">★</i>con ladrillo</span>' : '') + '<span><i class="c-x">–</i>sin starter</span>' : '')
-      + (deadOn ? '<span><i class="c-d">☠</i>muerta</span>' : '') + (tot.starter ? '' : '<span><i class="c-o">·</i>mano robada (marca starters para tu racha)</span>');
+    const legend = (K ? '<span><i class="c-s">★</i>con starter</span>' + (tot.brick ? '<span><i class="c-b">★</i>con ladrillo</span>' : '') + '<span><i class="c-x">–</i>sin starter</span>' : '')
+      + (deadOn ? '<span><i class="c-d">☠</i>muerta</span>' : '') + (K ? '' : '<span><i class="c-o">·</i>mano robada (marca starters para tu racha)</span>');
     // Racha: manos seguidas con starter
     let streak = '';
-    if (tot.starter) {
+    if (K) {
       let run = 0, best = 0;
       ks.forEach((k) => { run = k[0] ? run + 1 : 0; best = Math.max(best, run); });
       streak = '<p class="gx-streak"><span class="gx-streak-n" data-k="streak" data-v="' + run + '" aria-hidden="true">×' + run + '</span><span>Racha: <b>' + plural(run, 'mano') + '</b> seguida'
@@ -446,7 +482,7 @@
     const add = (id, label, ok, bad) => {
       const ps = L.map((e) => {
         const key = id + e.n;
-        if (pOf[key] == null) pOf[key] = game.pMulti(N, groups, e.n, ok);
+        if (pOf[key] == null) pOf[key] = cons.p(e.n, ok);
         return pOf[key];
       });
       const x = ks.filter(ok).length, exp = ps.reduce((s, p) => s + p, 0) / H;
@@ -460,8 +496,8 @@
         + '<span class="gx-bullet" aria-hidden="true"><i class="you ' + cls + '" style="width:' + (x / H * 100).toFixed(1) + '%"></i><i class="exp" style="left:' + (exp * 100).toFixed(1) + '%"></i></span>'
         + '<span class="e">esperado <b>' + pc(exp) + '</b>' + word + '</span></li>';
     };
-    const vs = (tot.starter ? add('s1', 'Con starter', METRICS[0].ok) : '')
-      + (tot.starter && tot.brick ? add('sl', 'Starter sin ladrillos', METRICS[6].ok) : '')
+    const vs = (K ? add('s1', 'Con starter', METRICS[0].ok) : '')
+      + (K && tot.brick ? add('sl', 'Starter sin ladrillos', METRICS[6].ok) : '')
       + (deadOn ? add('dd', 'Muertas', METRICS[7].ok, true) : '');
     let verdict = '';
     const main = rows[0];
@@ -513,12 +549,12 @@
       animate(box);
       return;
     }
-    const groups = kArr(tot);
-    const handK = hand.length ? roleCounts(hand) : null;
-    const ms = METRICS.filter((m) => m.need.every((r) => tot[r] > 0))
-      .map((m) => Object.assign({}, m, { p5: game.pMulti(N, groups, 5, m.ok), p6: game.pMulti(N, groups, 6, m.ok) }));
-    const K = tot.starter;
-    const sess = session(N, tot, groups);
+    cons = consOf(tot, N);
+    const K = cons.K;
+    const handK = hand.length ? cons.k(hand) : null;
+    const ms = METRICS.filter((m) => m.need.every((r) => (r === 'starter' ? K : tot[r]) > 0))
+      .map((m) => Object.assign({}, m, { p5: cons.p(5, m.ok), p6: cons.p(6, m.ok) }));
+    const sess = session(N, tot);
     if (!K) {
       box.innerHTML = header(tot, N, n)
         + '<div class="gx-grid gx-simple"><div class="gx-card gx-locked">' + seal('?', 'Sin rango todavía') + '<p><b>Sin rango todavía.</b> Marca tus starters '
@@ -527,7 +563,7 @@
         + achievements(ms, n, handK, false) + sess + '</div>';
     } else {
       box.innerHTML = header(tot, N, n)
-        + '<div class="gx-grid">' + hero(N, K, n, ms[0]) + roll(N, K, n, handK) + achievements(ms, n, handK, true) + sess + '</div>';
+        + '<div class="gx-grid">' + hero(N, K, n, ms[0], tot) + roll(N, K, n, handK) + achievements(ms, n, handK, true) + sess + '</div>';
     }
     animate(box);
   }
@@ -560,12 +596,17 @@
     const k = roleCounts(hand);
     const tot = roleCounts(d.main);
     const parts = [];
-    if (tot.starter) parts.push(k.starter ? '<span class="good">' + k.starter + ' starter' + (k.starter > 1 ? 's' : '') + '</span>' : '<span class="bad">sin starter</span>');
+    const h = cons && cons.joint ? cons.hand(hand) : null; // con ★½ o C2: lo que cuenta como starter
+    const s = h ? h.k[0] : k.starter;
+    if (h ? cons.K : tot.starter) parts.push(s ? '<span class="good">' + s + ' starter' + (s > 1 ? 's' : '') + '</span>' : '<span class="bad">sin starter</span>');
+    if (h && h.idle) parts.push('<span class="bad">' + h.idle + ' ' + (!tot.combo2 ? '★½ sin lo que necesita' + (h.idle > 1 ? 'n' : '')
+      : !tot.starter15 ? 'C2 sin pareja' : '★½/C2 sin lo que necesita' + (h.idle > 1 ? 'n' : '')) + '</span>');
+    if (h && h.killed) parts.push('<span class="bad">' + h.killed + ' anulado' + (h.killed > 1 ? 's' : '') + ' por un ladrillo</span>');
     if (tot.extender) parts.push(k.extender ? '<span class="good">' + k.extender + ' extender' + (k.extender > 1 ? 's' : '') + '</span>' : 'sin extender');
     if (tot.handtrap) parts.push(k.handtrap ? '<span class="good">' + k.handtrap + ' handtrap' + (k.handtrap > 1 ? 's' : '') + '</span>' : 'sin handtraps');
     if (tot.brick) parts.push(k.brick ? '<span class="bad">' + k.brick + ' ladrillo' + (k.brick > 1 ? 's' : '') + '</span>' : 'sin ladrillos');
     if (!parts.length) return '';
-    const dead = tot.starter && tot.handtrap && !k.starter && !k.handtrap;
+    const dead = (h ? cons.K : tot.starter) && tot.handtrap && !s && !k.handtrap;
     return '<p class="hand-line">Tu mano: ' + parts.join(' · ') + (dead ? ' · <span class="bad">mano muerta</span>' : '') + '</p>';
   }
 

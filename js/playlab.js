@@ -389,5 +389,7 @@
   YGO.playlab = {
     render(box, d, hand, n, hooks) { bind(box); render(box, d, hand, n, hooks); },
     editTags,
+    /** La cuenta exacta de una mano de n (la misma del panel, con su memoria): { m: modelo, a: analyze } */
+    analysis: (d, n) => analysisOf(d, n),
   };
 })();
