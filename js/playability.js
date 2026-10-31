@@ -1,8 +1,8 @@
 /* Jugadas: análisis de manos como thedeckspace.com y el video «Your Deckbuilding Theory is OUTDATED» (Gnurrgard,
  * 2026-10-30) que Oscar pidió como referencia el 2026-10-31. La hipergeométrica de siempre dice si abres un starter; esto
  * dice si abres una JUGADA y cuántas jugadas independientes tienes (cuántas handtraps aguantas):
- *  - Roles del motor: ★ Starter (sola es jugada), Starter 1,5 (necesita otra carta: del motor, un monstruo, una mágica o
- *    una trampa) y Pieza de combo (jugada con su pareja). Ladrillo es la carta que no quieres abrir; si «anula» a un
+ *  - Roles del motor: ★ Starter (sola es jugada), Starter 1,5 (necesita otra carta: del motor, un monstruo, una mágica,
+ *    una trampa o una de las cartas que marques) y Pieza de combo (jugada con su pareja). Ladrillo es la carta que no quieres abrir; si «anula» a un
  *    starter, abrirlos juntos deja ese starter sin jugada (Mind Shuffle con Black Chaos en el video).
  *  - Dos fuentes de jugada son la misma jugada si comparten carta (2 copias de algo 1 vez por turno), si las dos usan la
  *    Invocación Normal o si las marcaste así en «Revisar pares» (las dos terminan en la misma carta que te cortan).
@@ -18,7 +18,7 @@
 
   const ROLE_KEYS = ['starter', 'starter15', 'combo2', 'extender', 'handtrap', 'brick'];
   const ENGINE = new Set(['starter', 'starter15', 'combo2']);
-  const REQS = ['engine', 'monster', 'spell', 'trap'];
+  const REQS = ['engine', 'monster', 'spell', 'trap', 'cards']; // cards: una de mazo.tags[id].needs (Oscar 2026-10-31)
   const MAX_DECK = 60;
   const pairKey = (a, b) => (Number(a) < Number(b) ? a + '|' + b : b + '|' + a);
   const obj = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? x : null);
@@ -39,11 +39,12 @@
     if (role === 'starter') d.starters.push(id);
     else if (ROLE_KEYS.includes(role)) d.roles[id] = role;
   }
-  /** Etiquetas de una carta: { ns, nopt, req, links: [ids], kills: [ids] } (siempre un objeto nuevo) */
+  /** Etiquetas de una carta: { ns, nopt, req, links: [ids], kills: [ids], needs: [ids] } (siempre un objeto nuevo) */
   function tagsOf(d, id) {
     const t = obj(d.tags && d.tags[id]) || {};
     const ids = (x) => (Array.isArray(x) ? x.map(Number).filter((v) => Number.isInteger(v) && v > 0 && v !== Number(id)) : []);
-    return { ns: !!t.ns, nopt: !!t.nopt, req: REQS.includes(t.req) ? t.req : 'engine', links: ids(t.links), kills: ids(t.kills) };
+    const needs = ids(t.needs);
+    return { ns: !!t.ns, nopt: !!t.nopt, req: REQS.includes(t.req) && (t.req !== 'cards' || needs.length) ? t.req : 'engine', links: ids(t.links), kills: ids(t.kills), needs };
   }
   /** Guarda las etiquetas (borra las vacías para no ensuciar el mazo) */
   function setTags(d, id, t) {
@@ -51,7 +52,9 @@
     const v = {};
     if (t.ns) v.ns = true;
     if (t.nopt) v.nopt = true;
-    if (t.req && t.req !== 'engine' && REQS.includes(t.req)) v.req = t.req;
+    const needs = t.req === 'cards' && t.needs ? Array.from(new Set(t.needs.map(Number))).filter((x) => x !== Number(id)) : [];
+    if (t.req && t.req !== 'engine' && REQS.includes(t.req) && (t.req !== 'cards' || needs.length)) v.req = t.req;
+    if (v.req === 'cards') v.needs = needs;
     if (t.links && t.links.length) v.links = Array.from(new Set(t.links.map(Number)));
     if (t.kills && t.kills.length) v.kills = Array.from(new Set(t.kills.map(Number)));
     if (Object.keys(v).length) d.tags[id] = v; else delete d.tags[id];
@@ -91,7 +94,8 @@
       if (ENGINE.has(r)) {
         single.add(id);
         if (r === 'combo2') t.links.filter(inDeck).forEach((x) => single.add(x));
-        if (r === 'starter15' && t.req !== 'engine') needFrame = true;
+        if (r === 'starter15' && t.req === 'cards') t.needs.filter(inDeck).forEach((x) => single.add(x));
+        else if (r === 'starter15' && t.req !== 'engine') needFrame = true;
       }
     }
     for (const id of counts.keys()) {
@@ -107,6 +111,7 @@
         key: String(id), id, count: counts.get(id), role: r, ns: t.ns && ENGINE.has(r), nopt: t.nopt && ENGINE.has(r), req: t.req,
         frame: frame(id), links: new Set(r === 'combo2' ? t.links.filter(inDeck) : []),
         kills: new Set(r === 'brick' ? t.kills.filter((x) => inDeck(x) && ENGINE.has(role.get(x))) : []),
+        needs: new Set(r === 'starter15' && t.req === 'cards' ? t.needs.filter(inDeck) : []),
         free: r === 'combo2' && !t.links.some(inDeck) && !named.has(id),
       }) - 1]);
     }
@@ -168,7 +173,8 @@
       if (!x[i] || !ENGINE.has(t.role)) continue;
       if (cancelled.has(t.id)) { anyCancelled = true; continue; }
       if (t.role === 'starter15') {
-        const ok = t.req === 'engine' ? engineCards - x[i] >= 1 : fr[t.req] - (t.frame === t.req ? x[i] : 0) >= 1;
+        const ok = t.req === 'cards' ? T.some((u, j) => j !== i && x[j] && t.needs.has(u.id))
+          : t.req === 'engine' ? engineCards - x[i] >= 1 : fr[t.req] - (t.frame === t.req ? x[i] : 0) >= 1;
         if (!ok) continue;
       }
       if (t.role === 'starter' || t.role === 'starter15') {

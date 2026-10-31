@@ -1719,6 +1719,9 @@ button.rec-btn.rec-on::before { content: ""; display: inline-block; width: 8px; 
 @media (forced-colors: active) { .plc path, .plc-hb i { forced-color-adjust: none; } }
 
 /* Ventana «Etiquetas» */
+.tg-needs { display: flex; flex-direction: column; gap: 6px; }
+.tg-needs[hidden] { display: none; }
+.tg-err { margin: 0; font-size: 13.5px; color: #ff9a8f; }
 .modal-box:has(.tg) { width: min(600px, 100%); }
 .tg { display: flex; flex-direction: column; gap: 12px; }
 .tg fieldset { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }

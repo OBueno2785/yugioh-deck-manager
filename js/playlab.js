@@ -51,7 +51,7 @@
     ['handtrap', 'H Handtrap', 'interrumpe al rival (no-motor)'],
     ['brick', 'L Ladrillo', 'no la quieres abrir: siempre cuenta como muerta'],
   ];
-  const REQ_TXT = { engine: 'otra carta del motor', monster: 'un monstruo', spell: 'una mágica', trap: 'una trampa' };
+  const REQ_TXT = { engine: 'otra carta del motor', monster: 'un monstruo', spell: 'una mágica', trap: 'una trampa', cards: 'una de estas cartas…' };
 
   /** Clave del mazo para no repetir cuentas: lo que cambia el resultado */
   function sig(d) {
@@ -303,7 +303,10 @@
       + '<label class="tg-c"><input type="checkbox" id="tg-ns"' + (t.ns ? ' checked' : '') + '><span>Usa la <b>Invocación Normal</b> <small>(dos que la usan cuentan como una jugada)</small></span></label>'
       + '<label class="tg-c"><input type="checkbox" id="tg-nopt"' + (t.nopt ? ' checked' : '') + '><span>Cada copia es otra jugada <small>(no es «1 vez por turno»)</small></span></label></fieldset>'
       + '<fieldset class="tg-req" data-for="starter15"><legend>Necesita además</legend><select id="tg-req">' + P().REQS.map((r) => '<option value="' + r + '"' + (r === t.req ? ' selected' : '') + '>' + REQ_TXT[r] + '</option>').join('') + '</select>'
-      + '<p class="hint">En la mano, además de esta carta (por ejemplo, un servidor que necesita una mágica).</p></fieldset>'
+      + '<p class="hint">En la mano, además de esta carta (por ejemplo, un servidor que necesita una mágica). Con <b>una de estas cartas</b> marcas cuáles.</p>'
+      + '<div class="tg-needs"><p class="hint">Basta con abrir una de las que marques (otra copia de esta no cuenta).</p>'
+      + '<div class="tg-list">' + byRole.map((x) => check('tg-need', x, t.needs.includes(x))).join('') + '</div>'
+      + '<p class="tg-err" role="alert" hidden>Marca al menos una carta o elige otra opción.</p></div></fieldset>'
       + '<fieldset class="tg-links" data-for="combo2"><legend>Hace combo con</legend><p class="hint">Si no marcas ninguna, hace combo con cualquier otra Pieza de combo sin parejas.</p>'
       + '<div class="tg-list">' + byRole.map((x) => check('tg-link', x, t.links.includes(x))).join('') + '</div></fieldset>'
       + '<fieldset class="tg-kills" data-for="brick"><legend>Anula a</legend><p class="hint">Si la abres junto con una de estas, esa no te da jugada (como Mind Shuffle con Black Chaos en el video).</p>'
@@ -313,8 +316,12 @@
     const sync = () => {
       const r = (body.querySelector('input[name="tg-role"]:checked') || {}).value || '';
       body.querySelectorAll('fieldset[data-for]').forEach((f) => { f.hidden = !f.dataset.for.split(' ').includes(r); });
+      body.querySelector('.tg-needs').hidden = $('#tg-req').value !== 'cards';
     };
-    body.addEventListener('change', (e) => { if (e.target.name === 'tg-role') sync(); });
+    body.addEventListener('change', (e) => {
+      if (e.target.name === 'tg-role' || e.target.id === 'tg-req') sync();
+      if (e.target.name === 'tg-need') body.querySelector('.tg-err').hidden = true;
+    });
     sync();
     const foot = $('#modal-foot');
     foot.innerHTML = '<button type="button" data-tg="cancel">Cancelar</button><button type="button" class="primary" data-tg="save">Guardar</button>';
@@ -322,8 +329,14 @@
     foot.querySelector('[data-tg="save"]').addEventListener('click', () => {
       const r = (body.querySelector('input[name="tg-role"]:checked') || {}).value || '';
       const vals = (name) => Array.from(body.querySelectorAll('input[name="' + name + '"]:checked')).map((x) => Number(x.value));
+      if (r === 'starter15' && $('#tg-req').value === 'cards' && !vals('tg-need').length) {
+        const err = body.querySelector('.tg-err');
+        err.hidden = false;
+        err.scrollIntoView({ block: 'nearest' });
+        return;
+      }
       P().setRole(d, id, r);
-      P().setTags(d, id, { ns: $('#tg-ns').checked, nopt: $('#tg-nopt').checked, req: $('#tg-req').value, links: vals('tg-link'), kills: vals('tg-kill') });
+      P().setTags(d, id, { ns: $('#tg-ns').checked, nopt: $('#tg-nopt').checked, req: $('#tg-req').value, links: vals('tg-link'), kills: vals('tg-kill'), needs: vals('tg-need') });
       $('#modal').hidden = true;
       if (hooks && hooks.saved) hooks.saved(id);
     });
