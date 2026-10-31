@@ -329,13 +329,13 @@
     }
     let c = 0, lo = -1, hi = -1;
     for (let k = 0; k < f.length; k++) { c += f[k]; if (lo < 0 && c >= 0.025) lo = k; if (hi < 0 && c >= 0.975) { hi = k; break; } }
-    return { lo: Math.max(0, lo), hi: hi < 0 ? f.length - 1 : hi, p0: f[0] };
+    return { lo: Math.max(0, lo), hi: hi < 0 ? f.length - 1 : hi, p0: f[0], dist: f };
   }
 
   /* Torneo: cada ronda son 3 partidas. Cuántas vas primero (mano de 5) por ronda según la idea que tengas:
    * prudente 2 (pierdes el dado y te toca empezar más), normal 1,5 (cada partida a la mitad) y optimista 1. */
   const MODES = { prudente: 2, normal: 1.5, optimista: 1 };
-  /** → { games, expected, lo, hi, pAny } con brick5 / brick6 = P(ladrillo) con mano de 5 / de 6 */
+  /** → { games, expected, lo, hi, pAny, dist } con brick5 / brick6 = P(ladrillo) con mano de 5 / de 6; dist[k] = P(k partidas así) */
   function tournament(brick5, brick6, rounds, mode) {
     const g1 = MODES[mode] != null ? MODES[mode] : 1.5;
     const ps = [];
@@ -344,7 +344,7 @@
       else for (let g = 0; g < 3; g++) ps.push(g < g1 ? brick5 : brick6);
     }
     const r = range95(ps);
-    return { games: ps.length, expected: ps.reduce((s, p) => s + p, 0), lo: r.lo, hi: r.hi, pAny: 1 - r.p0 };
+    return { games: ps.length, expected: ps.reduce((s, p) => s + p, 0), lo: r.lo, hi: r.hi, pAny: 1 - r.p0, dist: r.dist };
   }
 
   /** Cómo cambia el mazo si agregas no-motor (handtraps u otras cartas que no son del motor) hasta 60 →

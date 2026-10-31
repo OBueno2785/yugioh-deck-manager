@@ -5,11 +5,17 @@
  * muertas, eslabones débiles, Invocación Normal, torneo, «Revisar pares» y el tamaño del mazo con más no-motor.
  * Los pares revisados no cambian «jugable» (con una jugada ya juegas) sino cuántas jugadas abres: el recuadro «Lo que cambiaron
  * tus pares» compara con no revisar ninguno, y cada toque en un par dice qué movió (pedido de Oscar 2026-10-31: «falta conectar»).
+ * Gráficas (js/plcharts.js, pedido de Oscar 2026-10-31 «agrega gráficas al nuevo análisis»): cuántas jugadas abres con mano de
+ * 5 y de 6, sin revisar / con tus pares, eslabones débiles en barras, partidas del torneo y el tamaño del mazo en líneas.
  * Expone window.YGO.playlab = { render, editTags }. Lo llama js/handtest.js. */
 (function () {
   const YGO = window.YGO;
   const { db, game, view, store } = YGO;
   const P = () => YGO.play;
+  const C = () => YGO.plcharts;
+  // Colores de las series (css: .pl): 1 dorado, 2 azul, 0 gris para lo que se compara
+  const COL = { s1: 'var(--plc-1)', s2: 'var(--plc-2)', base: 'var(--plc-0)' };
+  const DIST_CATS = ['Ladrillo', '1 jugada', '2 jugadas', '3 o más'];
   const esc = view.esc;
   const $ = (sel, root) => (root || document).querySelector(sel);
 
@@ -18,6 +24,7 @@
   const PAIRS_SHOWN = 12;
   let allPairs = false, openPairs = false, openSize = false;
   let ctx = null; // { box, d, hand, n, hooks } del último dibujo
+  let charts = {}; // las gráficas del último dibujo: id → spec (js/plcharts.js)
   let lastFx = null; // { key, a, b, v, before, after }: el último par tocado y lo que movió
   const memo = new Map();
 
@@ -67,6 +74,7 @@
   /* ---------- Panel ---------- */
   function render(box, d, hand, n, hooks) {
     ctx = { box, d, hand, n, hooks };
+    charts = {};
     if (!box) return;
     if (!P() || !d || !d.main.length) { box.innerHTML = ''; box.hidden = true; return; }
     box.hidden = false;
@@ -88,15 +96,18 @@
       + '<header class="pl-head"><h4 id="pl-h">Jugadas · mano de ' + n + '</h4>'
       + '<p class="pl-sub">No basta con abrir un starter: aquí cuenta si abres una <b>jugada</b> y cuántas jugadas independientes tienes. Cada jugada de más es una handtrap más que aguantas.</p></header>'
       + stats(a, b, n)
-      + distBar(a)
+      + distChart(a, b, n)
       + handLine(d, m, hand, n)
       + fxBox(d, n, a, pairs, pending)
       + '<div class="pl-grid">' + whyBox(a) + deadBox(a) + weakBox(a, pending) + nsBox(d, n) + tourBox(d) + '</div>'
       + pairsBox(d, n, pairs, pending)
       + sizeBox(d, n)
       + '</section>';
+    C().mount(box, charts);
     if (focus) { const el = box.querySelector(focus); if (el) el.focus(); }
   }
+  /** El lugar de una gráfica (se dibuja con plcharts.mount al final de render) */
+  const chart = (id, spec) => { charts[id] = spec; return C().place(id, spec); };
 
   function stats(a, b, n) {
     const brick = 1 - a.pPlay;
@@ -110,11 +121,13 @@
       + '</div>';
   }
 
-  function distBar(a) {
-    const lab = ['Ladrillo', '1 jugada', '2 jugadas', '3 o más'];
-    const segs = a.dist.map((p, i) => (p > 0.0005 ? '<i class="pl-d' + i + '" style="width:' + (p * 100).toFixed(2) + '%"></i>' : '')).join('');
-    return '<div class="pl-dist"><span class="pl-bar" aria-hidden="true">' + segs + '</span>'
-      + '<ul class="pl-legend" aria-label="Cuántas jugadas abres">' + a.dist.map((p, i) => '<li><i class="pl-d' + i + '" aria-hidden="true"></i>' + lab[i] + ' <b>' + pc(p) + '</b></li>').join('') + '</ul></div>';
+  /** Cuántas jugadas abres: columnas de la mano de 5 y la de 6 (el color sigue a la mano, el valor va sobre la elegida) */
+  function distChart(a, b, n) {
+    const a5 = n === 5 ? a : b, a6 = n === 5 ? b : a;
+    const spec = { kind: 'cols', label: 'Cuántas jugadas abres con mano de 5 y con mano de 6', cats: DIST_CATS, fmt: pc, cap: n === 5 ? 0 : 1,
+      series: [{ name: 'Mano de 5 · yendo primero', color: COL.s1, values: a5.dist }, { name: 'Mano de 6 · yendo segundo', color: COL.s2, values: a6.dist }] };
+    return '<div class="pl-chart pl-dist"><div class="pl-chead"><h5>Cuántas jugadas abres</h5>' + C().legend(spec) + '</div>'
+      + chart('dist', spec) + C().table(spec, 'Jugadas') + '</div>';
   }
 
   function handLine(d, m, hand, n) {
@@ -140,10 +153,16 @@
     return '<div class="pl-fx" data-k="pl-fx"><h5>Lo que cambiaron tus pares</h5>'
       + '<p class="pl-note">' + (pairs.length - pending) + ' de ' + plural(pairs.length, 'par', 'pares') + ' revisados, comparado con no revisar ninguno (mano de ' + n + '):</p>'
       + (same ? '<p class="pl-note">Las cifras quedan igual: marcaste cada par como la cuenta ya lo suponía (<b>2 jugadas</b>, o <b>1</b> si las dos usan la Invocación Normal). Solo cambian si dos cartas que no usan la Invocación Normal son <b>1 jugada</b>, o al revés.</p>'
-        : '<ul class="pl-rows pl-fxl">' + row('2 o más jugadas <small>aguantas 1 handtrap</small>', r.pTwo, a.pTwo, pc) + row('Una sola jugada <small>1 handtrap te para</small>', r.dist[1], a.dist[1], pc)
-          + row('Jugadas en promedio', r.avgPlays, a.avgPlays, dec) + '</ul>')
+        : '<div class="pl-fxgrid"><ul class="pl-rows pl-fxl">' + row('2 o más jugadas <small>aguantas 1 handtrap</small>', r.pTwo, a.pTwo, pc) + row('Una sola jugada <small>1 handtrap te para</small>', r.dist[1], a.dist[1], pc)
+          + row('Jugadas en promedio', r.avgPlays, a.avgPlays, dec) + '</ul>' + fxChart(r, a, n) + '</div>')
       + '<p class="pl-note"><b>Jugable</b> (' + pc(a.pPlay) + ') y <b>ladrillo</b> no cambian con los pares: con una jugada ya juegas. Los pares dicen <b>cuántas handtraps aguantas</b>: cambian 2 o más jugadas, la barra, Eslabones débiles y, en Torneo, las partidas en que una handtrap te para.'
       + (pending ? ' Te faltan ' + warn + ' por revisar.' : '') + '</p></div>';
+  }
+
+  function fxChart(r, a, n) {
+    const spec = { kind: 'cols', label: 'Cuántas jugadas abres sin revisar pares y con tus pares, mano de ' + n, cats: DIST_CATS, fmt: pc, cap: 1, h: 150,
+      series: [{ name: 'Sin revisar', color: COL.base, values: r.dist }, { name: 'Con tus pares', color: COL.s1, values: a.dist }] };
+    return '<div class="pl-chart">' + C().legend(spec) + chart('fx', spec) + C().table(spec, 'Jugadas') + '</div>';
   }
 
   function whyBox(a) {
@@ -161,10 +180,12 @@
   }
 
   function weakBox(a, pending) {
-    const list = P().weakLinks(a).filter((c) => c.share > 0.005).slice(0, 3);
+    const list = P().weakLinks(a).filter((c) => c.share > 0.005).slice(0, 5);
     return '<div class="pl-box"><h5>Eslabones débiles</h5>'
-      + (list.length ? '<ol class="pl-weak">' + list.map((c) => '<li><button type="button" class="pl-card" data-card="' + c.id + '">' + esc(nameOf(c.id)) + '</button>'
-        + '<span>con ella en la mano, <b>' + pc(c.share) + '</b> de tus manos jugables tienen <b>una sola jugada</b> (la abres en ' + pc(c.pIn) + ')</span></li>').join('') + '</ol>'
+      + (list.length ? '<p class="pl-note">Con ella en la mano, cuántas de tus manos jugables tienen <b>una sola jugada</b>:</p>'
+        + '<ol class="pl-weak">' + list.map((c) => '<li><button type="button" class="pl-card" data-card="' + c.id + '">' + esc(nameOf(c.id)) + '</button>'
+        + '<span class="pl-hb" aria-hidden="true"><i style="width:' + (c.share * 100).toFixed(1) + '%"></i></span><b>' + pc(c.share) + '</b>'
+        + '<small>la abres en ' + pc(c.pIn) + '</small></li>').join('') + '</ol>'
         : '<p class="pl-note">Ninguna carta te deja con una sola jugada.</p>')
       + (pending ? '<p class="pl-note">Cambia cuando revises los pares.</p>' : '<p class="pl-note">Son las primeras candidatas a cambiar: busca otra carta que abra una jugada distinta.</p>') + '</div>';
   }
@@ -190,7 +211,20 @@
       + '<p class="pl-big"><b>' + dec(r.expected) + '</b> partidas sin jugada en ' + plural(prefs.plRounds, 'ronda') + ' (' + r.games + ' partidas)</p>'
       + '<p class="pl-note">Lo normal: entre <b>' + r.lo + '</b> y <b>' + r.hi + '</b>. Al menos una: <b>' + pc(r.pAny) + '</b>. Cada ronda son 3 partidas.</p>'
       + '<p class="pl-big pl-one"><b>' + dec(one.expected) + '</b> con 1 jugada o ninguna: ahí una handtrap te para</p>'
-      + '<p class="pl-note">Lo normal: entre <b>' + one.lo + '</b> y <b>' + one.hi + '</b>. Esta cifra usa tus pares revisados.</p></div>';
+      + '<p class="pl-note">Lo normal: entre <b>' + one.lo + '</b> y <b>' + one.hi + '</b>. Esta cifra usa tus pares revisados.</p>'
+      + tourChart(r, one) + '</div>';
+  }
+
+  /** Probabilidad de que te pase en k de las partidas, de 0 hasta donde queda menos de 0,5% */
+  function tourChart(r, one) {
+    const upTo = (dist) => { let c = 0; for (let k = 0; k < dist.length; k++) { c += dist[k]; if (c >= 0.995) return k; } return dist.length - 1; };
+    const K = Math.min(r.games, Math.max(3, upTo(r.dist), upTo(one.dist)));
+    const ks = Array.from({ length: K + 1 }, (_, k) => k);
+    const spec = { kind: 'cols', label: 'En cuántas de las ' + r.games + ' partidas te pasa', cats: ks.map(String), fmt: pc, h: 160,
+      title: (i) => (i === 1 ? '1 partida' : i + ' partidas') + ' de ' + r.games,
+      series: [{ name: 'Sin jugada', color: COL.s1, values: ks.map((k) => r.dist[k] || 0) }, { name: '1 jugada o ninguna', color: COL.s2, values: ks.map((k) => one.dist[k] || 0) }] };
+    return '<div class="pl-chart"><div class="pl-chead"><h6>En cuántas partidas de ' + r.games + ' te pasa</h6>' + C().legend(spec) + '</div>'
+      + chart('tour', spec) + C().table(spec, 'Partidas') + '</div>';
   }
 
   /** Lo que movió el último par tocado */
@@ -235,6 +269,7 @@
       body = '<p class="pl-note">Si llenas el mazo con no-motor (handtraps u otras cartas que no usa tu combo): abres menos jugadas pero también menos ladrillos.</p>'
         + '<p class="pl-big">' + (keep.size > N ? 'Hasta <b>' + keep.size + ' cartas</b> pierdes menos de 1 punto de jugable (' + pc(cur.pPlay) + ' → ' + pc(keep.pPlay) + ').' : 'Cada carta de más te quita más de 1 punto de jugable.')
         + (s90 && s90.size > N && s90.size !== keep.size ? ' Con 90% o más: hasta <b>' + s90.size + '</b>.' : '') + '</p>'
+        + sizeChart(rows, n)
         + '<div class="pl-twrap"><table class="pl-size-t"><caption class="sr">Tamaño del mazo con no-motor de relleno, mano de ' + n + '</caption>'
         + '<thead><tr><th scope="col">Cartas</th><th scope="col" class="num">Jugable</th><th scope="col" class="num">2+ jugadas</th><th scope="col" class="num">Jugadas</th><th scope="col" class="num">Muertas</th></tr></thead><tbody>'
         + rows.map((r) => '<tr' + (r.size === N ? ' class="cur"' : '') + '><th scope="row">' + r.size + (r.size === N ? ' <small>(ahora)</small>' : '') + '</th>'
@@ -242,6 +277,13 @@
         + '</tbody></table></div>';
     }
     return '<details class="pl-size"' + (openSize ? ' open' : '') + ' data-pl-open="size"><summary>Tamaño del mazo · agregar no-motor hasta ' + P().MAX_DECK + '</summary>' + body + '</details>';
+  }
+
+  function sizeChart(rows, n) {
+    const spec = { kind: 'line', label: 'Jugable y 2 o más jugadas según cuántas cartas tiene el mazo, mano de ' + n, xs: rows.map((r) => r.size), fmt: pc,
+      title: (i) => rows[i].size + ' cartas' + (i === 0 ? ' (ahora)' : ''),
+      series: [{ name: 'Jugable', color: COL.s1, values: rows.map((r) => r.pPlay) }, { name: '2 o más jugadas', color: COL.s2, values: rows.map((r) => r.pTwo) }] };
+    return '<div class="pl-chart pl-sizec">' + C().legend(spec) + chart('size', spec) + '</div>';
   }
 
   /* ---------- Etiquetas de una carta ---------- */
