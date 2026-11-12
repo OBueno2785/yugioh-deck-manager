@@ -34,9 +34,9 @@
   const roleOf = (id) => window.YGO.play.roleOf(d, id);
   const setRole = (id, role) => window.YGO.play.setRole(d, id, role);
   /** Cuenta los roles de una lista de códigos → { starter, starter15, combo2, extender, handtrap, brick } */
-  function roleCounts(list) {
+  function roleCounts(list, dk) {
     const out = Object.fromEntries(ROLES.map((r) => [r.k, 0]));
-    for (const id of list) { const r = roleOf(id); if (r) out[r]++; }
+    for (const id of list) { const r = dk ? window.YGO.play.roleOf(dk, id) : roleOf(id); if (r) out[r]++; }
     return out;
   }
   const savePrefs = () => store.savePrefs(Object.assign(store.prefs(), { handSize: prefs.handSize, statsView: prefs.statsView }));
@@ -192,13 +192,13 @@
    * cons (del último dibujo) = { joint, K: cartas que pueden ser starter, p(n, ok): P(ok([s, e, h, l])), k(ids): [s, e, h, l] de
    * una mano, hand(ids): además lo que quedó sin jugada } */
   let cons = null;
-  function consOf(tot, N) {
-    const P = window.YGO.play, lab = window.YGO.playlab, groups = kArr(tot);
+  function consOf(tot, N, dk) {
+    const P = window.YGO.play, lab = window.YGO.playlab, groups = kArr(tot), dd = dk || d;
     if (!(tot.starter15 || tot.combo2) || !P) {
-      return { joint: false, K: tot.starter, p: (n, ok) => game.pMulti(N, groups, n, ok), k: (ids) => kArr(roleCounts(ids)), hand: () => null };
+      return { joint: false, K: tot.starter, p: (n, ok) => game.pMulti(N, groups, n, ok), k: (ids) => kArr(roleCounts(ids, dk)), hand: () => null };
     }
     const own = {};
-    const an = (n) => (lab ? lab.analysis(d, n) : (own[n] = own[n] || ((m) => ({ m, a: P.analyze(m, n) }))(P.model(d))));
+    const an = (n) => (lab ? lab.analysis(dd, n) : (own[n] = own[n] || ((m) => ({ m, a: P.analyze(m, n) }))(P.model(dd))));
     return { joint: true, K: tot.starter + tot.starter15 + tot.combo2, p: (n, ok) => P.jointP(an(n).a, ok),
       k: (ids) => P.handCounts(an(5).m, ids).k, hand: (ids) => P.handCounts(an(5).m, ids) };
   }
@@ -724,5 +724,31 @@
   }
 
   bind();
-  window.YGO.handtest = { enter, rerender: () => d && render() };
+  /** Las cifras del panel Consistencia para cualquier mazo, sin tocar la prueba de mano (las usa js/compare.js):
+   * { N, tot, K, joint, what, ms: [{ id, label, bad, icon, p5, p6 }], dist5, dist6 } con dist = P(0, 1, 2, 3+ starters) */
+  function summaryOf(dk) {
+    const N = dk.main.length, tot = roleCounts(dk.main, dk);
+    const any = ROLES.some((r) => tot[r.k]);
+    if (!N || !any) return { N, tot, K: 0, joint: false, what: '', ms: [], dist5: null, dist6: null, any };
+    const c = consOf(tot, N, dk), K = c.K;
+    const ms = METRICS.filter((m) => m.need.every((r) => (r === 'starter' ? K : tot[r]) > 0))
+      .map((m) => ({ id: m.id, label: m.label, bad: !!m.bad, icon: m.icon, p5: c.p(5, m.ok), p6: c.p(6, m.ok) }));
+    const dist = (n) => {
+      if (!K) return null;
+      const x = [0, 1, 2].map((k) => (c.joint ? c.p(n, (v) => v[0] === k) : game.pExactly(N, K, n, k)));
+      x.push(Math.max(0, 1 - x[0] - x[1] - x[2]));
+      return x;
+    };
+    return { N, tot, K, joint: c.joint, what: c.joint ? starterWhat(tot) : '★', ms, dist5: dist(5), dist6: dist(6), any };
+  }
+
+  /** Elige ese mazo para la próxima vez que entres a Prueba de mano (lo usa «Marcar roles» de Comparar) */
+  function show(id) {
+    const x = decks().find((y) => String(y.id) === String(id));
+    if (!x || x === d) return;
+    d = x; sims = { log: [], count: 0 }; prevVals = new Map(); resetDeck();
+  }
+
+  window.YGO.handtest = { enter, show, rerender: () => d && render(), summaryOf,
+    kit: { ROLES, ROLE, METRICS, RANKS, MEDALS, SCALE, r1, rankOf, medalOf, pc, oneIn, badge, seal, freq, ladder, medalIcons } };
 })();

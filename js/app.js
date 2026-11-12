@@ -1,7 +1,7 @@
-/* Navegación entre Constructor, Prueba de mano, Campo, Combos y Tableros (con #constructor, #mano, #campo, #combos, #tableros). */
+/* Navegación entre Constructor, Prueba de mano, Campo, Combos y Tableros y Comparar (con #constructor, #mano, #campo, #combos, #tableros, #comparar). */
 (function () {
   const YGO = window.YGO;
-  const MODES = ['constructor', 'mano', 'campo', 'combos', 'tableros'];
+  const MODES = ['constructor', 'mano', 'campo', 'combos', 'tableros', 'comparar'];
 
   function route(want) {
     const h = typeof want === 'string' ? want : location.hash.replace('#', '');
@@ -25,6 +25,7 @@
     if (mode === 'campo') YGO.field.enter();
     if (mode === 'combos' && YGO.combolab) YGO.combolab.enter();
     if (mode === 'tableros' && YGO.boardlab) YGO.boardlab.enter();
+    if (mode === 'comparar' && YGO.compare) YGO.compare.enter();
   }
 
   // Al cambiar de modo dentro del visor no siempre llega hashchange; se maneja el clic directamente

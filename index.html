@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Cinzel:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="css/style.css?v=72bff54095">
+<link rel="stylesheet" href="css/style.css?v=d961b54fc2">
 </head>
 <body>
 <div class="app" data-mode="builder">
@@ -20,6 +20,7 @@
       <a class="mode" href="#campo">Campo</a>
       <a class="mode" href="#combos">Combos</a>
       <a class="mode" href="#tableros">Tableros</a>
+      <a class="mode" href="#comparar">Comparar</a>
     </nav>
     <p class="db-info"><span id="db-count">0</span> cartas · banlist <span id="banlist-name">TCG</span><span id="online-badge" class="online-badge" hidden title="Conectado a YGOPRODeck: imágenes y cartas nuevas">YGOPRODeck</span></p>
   </header>
@@ -163,6 +164,20 @@
     </aside>
   </main>
 
+  <main class="compare mode-pane" data-mode="comparar" hidden>
+    <section class="cmp-main">
+      <div class="toolrow cmp-tools">
+        <label class="cmp-pick"><span class="cmp-tag t-a" aria-hidden="true">A</span><span class="sr">Mazo A</span><select id="cmp-a" class="deck-select"></select></label>
+        <button id="cmp-swap" type="button" title="Cambiar de lado" aria-label="Cambiar los mazos de lado">⇄</button>
+        <label class="cmp-pick"><span class="cmp-tag t-b" aria-hidden="true">B</span><span class="sr">Mazo B</span><select id="cmp-b" class="deck-select"></select></label>
+        <div id="cmp-size" class="seg" role="group" aria-label="Tamaño de la mano">
+          <button type="button" data-n="5">Primero · 5</button><button type="button" data-n="6">Segundo · 6</button>
+        </div>
+      </div>
+      <div id="cmp-body" class="ht-stats cmp pl"></div>
+    </section>
+  </main>
+
   <main class="combolab mode-pane" data-mode="combos" hidden>
     <aside class="panel cl-side" aria-label="Combos grabados del mazo">
       <div class="toolrow">
@@ -283,9 +298,10 @@
 <script src="js/sample-deck.js?v=377fee55a3"></script>
 <script src="js/preset-decks.js?v=8b9b7aa993"></script>
 <script src="js/preset-combos.js?v=4f2ea6d1fd"></script>
+<script src="js/preset-shared.js?v=78a71d08dd"></script>
 <script src="js/carddb.js?v=6bbcb3509b"></script>
-<script src="js/deck.js?v=b322424576"></script>
-<script src="js/backup.js?v=4656160e0b"></script>
+<script src="js/deck.js?v=8e43ed0ed9"></script>
+<script src="js/backup.js?v=8f218b7aa9"></script>
 <script src="js/cardview.js?v=17253a4743"></script>
 <script src="js/online.js?v=ebb58b211c"></script>
 <script src="js/game.js?v=5e9d0b5c9c"></script>
@@ -299,9 +315,10 @@
 <script src="js/boards.js?v=ba83a76542"></script>
 <script src="js/vsview.js?v=9d027decc5"></script>
 <script src="js/deckbuilder.js?v=ae69bc1483"></script>
-<script src="js/handtest.js?v=eeff9fbfeb"></script>
+<script src="js/handtest.js?v=db7b23148a"></script>
 <script src="js/plcharts.js?v=79c113f1e4"></script>
 <script src="js/playlab.js?v=c0fd31f769"></script>
+<script src="js/compare.js?v=06c93e2fb8"></script>
 <script src="js/attempts.js?v=37c0559fba"></script>
 <script src="js/field.js?v=43a02c2491"></script>
 <script src="js/vs.js?v=5850e03501"></script>
@@ -310,6 +327,6 @@
 <script src="js/pvp.js?v=f6f08bc832"></script>
 <script src="js/combolab.js?v=1e5942a791"></script>
 <script src="js/boardlab.js?v=db5fc81ac9"></script>
-<script src="js/app.js?v=02e2514e06"></script>
+<script src="js/app.js?v=96f9190511"></script>
 </body>
 </html>

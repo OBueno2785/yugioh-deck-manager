@@ -304,6 +304,10 @@
       if (YGO.combos && YGO.combos.seedPresets) {
         try { YGO.combos.seedPresets(list, prefs); } catch (e) { /* sin combos: los mazos igual cargan */ }
       }
+      // Los mazos guardados de Oscar para todos los equipos (js/preset-shared.js), una vez
+      if (YGO.backup && YGO.backup.seedShared) {
+        try { const r = YGO.backup.seedShared(list, prefs); if (r.changed) { list = r.list; write(KEY, list); } } catch (e) { /* sin ellos: lo tuyo igual carga */ }
+      }
       write(PREF, prefs);
       return list;
     },

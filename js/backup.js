@@ -166,5 +166,29 @@
     return 'browser';
   }
 
-  YGO.backup = { APP, V, make, toText, counts, filename, when, parse, plan, apply, persist, prefetch, download };
+  /** Mazos de Oscar para todos los equipos (js/preset-shared.js, de su copia de seguridad del 2026-11-12: «mantén los mazos que
+   * tengo guardados en este terminal y ponlos para que se vean en todos los terminales»). Se suman una vez por navegador
+   * (prefs.sharedAdded) como al restaurar la copia, pero sin pisar mazos ajenos: uno reemplaza solo al suyo (mismo id, en el
+   * equipo de Oscar, y solo si el guardado no es más nuevo) o al mazo compartido de la misma versión (mismo presetId); los
+   * demás se agregan. Lo llama YGO.store.load, que guarda prefs → { list, changed } */
+  function seedShared(list, prefs) {
+    const S = window.YGO_SHARED_DECKS;
+    const done = arr(prefs && prefs.sharedAdded);
+    if (!obj(S) || !S.id || done.includes(S.id) || window.YGO_SHARED_OFF) return { list, changed: false }; // (OFF: pruebas de navegador nuevo)
+    const r = parse(JSON.stringify(Object.assign({}, S, { app: APP, v: V })));
+    if (!r.ok) return { list, changed: false };
+    const used = new Set(), items = [];
+    for (const inc of r.data.decks) {
+      let m = arr(list).find((d) => !used.has(d) && d.id === inc.id);
+      if (!m && inc.presetId) m = arr(list).find((d) => !used.has(d) && d.presetId === inc.presetId);
+      if (m) used.add(m);
+      if (m && m.id === inc.id && (Number(m.updated) || 0) >= (Number(inc.updated) || 0)) continue; // tu mismo mazo, igual o más nuevo
+      items.push({ inc, local: m || null });
+    }
+    const res = apply(list, r.data, { items, replace: items.filter((x) => x.local), add: items.filter((x) => !x.local) });
+    prefs.sharedAdded = done.concat(S.id);
+    return { list: res.list, changed: items.length > 0 };
+  }
+
+  YGO.backup = { APP, V, make, seedShared, toText, counts, filename, when, parse, plan, apply, persist, prefetch, download };
 })();
