@@ -4811,7 +4811,7 @@
   function stepsHtml(c) {
     const items = c.steps.map((st) => {
       const t = comboCall('describe', [c, st], { title: '', detail: [] });
-      return '<li><b>' + esc(t.title) + '</b>' + arr(t.detail).map((x) => '<span class="cb-det">' + esc(x) + '</span>').join('') + '</li>';
+      return '<li><b>' + esc(t.title) + '</b>' + (t.note ? '<span class="cb-note">' + esc(t.note) + '</span>' : '') + arr(t.detail).map((x) => '<span class="cb-det">' + esc(x) + '</span>').join('') + '</li>';
     });
     const fin = arr(comboCall('finalNames', [c], []));
     return '<ol class="cb-steps">' + items.join('') + '</ol>' + (fin.length ? '<p class="hint">Campo final: ' + esc(fin.join(', ')) + '</p>' : '');
@@ -5164,7 +5164,7 @@
     // (la carta del paso queda elegida y su texto en el panel; en el teléfono no: la hoja taparía el tablero)
     if (r.sel && !(window.matchMedia && window.matchMedia('(max-width: 899px)').matches)) selected = r.sel;
     const t = comboCall('describe', [c, st], { title: '', detail: [] });
-    pushLog({ kind: 'auto', text: 'Combo, paso ' + play.n + ' de ' + c.steps.length + ': ' + t.title });
+    pushLog({ kind: 'auto', text: 'Combo, paso ' + play.n + ' de ' + c.steps.length + ': ' + (t.note || t.title) });
     if (play.n >= c.steps.length) {
       play.end = true;
       pushLog({ kind: 'auto', text: 'Combo terminado: ' + q(c.name) });
@@ -5185,7 +5185,8 @@
     else if (!play.n) {
       text = 'Reproduce ' + q(c.name) + ': ' + N + (N === 1 ? ' paso' : ' pasos') + '.';
       sub = speed === 'step' || play.paused ? 'Toca «Siguiente» para hacer el primer paso.' : 'Empieza en un momento. Tocar el tablero, la mano o el panel lo pausa.';
-    } else { text = 'Paso ' + play.n + ' de ' + N + ': ' + last.title; sub = arr(last.detail).join(' · '); }
+    } else { text = 'Paso ' + play.n + ' de ' + N + ': ' + last.title; sub = last.note || arr(last.detail).join(' · '); }
+    const subNote = !!(last && last.note && sub === last.note);
     const btn = (act, label, kind, dis) => '<button type="button" data-rp="' + act + '"' + (kind ? ' class="' + kind + '"' : '') + (dis ? ' disabled' : '') + '>' + esc(label) + '</button>';
     const btns = [btn('prev', '‹ Anterior', '', !play.n)];
     if (play.end) btns.push(btn('again', 'Repetir', 'primary'), btn('stop', 'Cerrar', ''));
@@ -5202,7 +5203,7 @@
       + '<p id="vs-msg">' + esc(text) + '</p><div class="vs-btns">' + btns.join('')
       + (play.end ? '' : '<label class="rp-speed"><span class="sr">Velocidad</span><select id="rp-speed" aria-label="Velocidad">' + opts + '</select></label>') + '</div>'
       + '<div class="rp-prog" role="progressbar" aria-label="Pasos hechos" aria-valuemin="0" aria-valuemax="' + N + '" aria-valuenow="' + play.n + '"><span style="width:' + pct + '%"></span></div>'
-      + (sub ? '<p class="vs-sub">' + esc(sub) + '</p>' : '') + '</div>';
+      + (sub ? '<p class="vs-sub' + (subNote ? ' vs-note' : '') + '">' + esc(sub) + '</p>' : '') + '</div>';
   }
   function playClick(act) {
     if (!play) return;

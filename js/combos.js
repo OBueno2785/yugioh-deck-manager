@@ -450,7 +450,13 @@
   const moveEs = (combo, m) => refName(combo, m.r) + ': ' + (m.draw ? 'se roba' : placeEs(combo, m.from) + ' → ' + placeEs(combo, m.to));
   /** Un paso en palabras (para la lista de Prueba). → { title, detail: [texto] } */
   function describe(combo, st) {
-    if (!combo || !st) return { title: '', detail: [] };
+    if (!combo || !st) return { title: '', detail: [], note: '' };
+    const d = describeStep(combo, st);
+    // Lo que hace el paso en palabras (los combos compartidos lo traen: js/preset-combos.js)
+    d.note = typeof st.note === 'string' ? st.note.slice(0, 600) : '';
+    return d;
+  }
+  function describeStep(combo, st) {
     if (st.t === 'act') {
       const names = st.links.map((l) => refName(combo, l.r));
       const title = (st.links.some((l) => l.inferred) ? 'Pone boca arriba ' : 'Activa ') + listEs(names) + (st.links.length > 1 ? ' (en cadena)' : '');

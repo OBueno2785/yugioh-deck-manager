@@ -148,7 +148,7 @@
     const items = steps.map((st, i) => {
       const t = call('describe', [c, st], { title: '', detail: [] });
       return '<li class="cl-step"><span class="cl-n">' + (i + 1) + '</span><div class="cl-step-cards">' + tiles(stepCards(c, st), 'sm') + '</div>'
-        + '<div class="cl-step-text"><b>' + esc(t.title) + '</b>' + arr(t.detail).map((x) => '<span class="cb-det">' + esc(x) + '</span>').join('') + '</div></li>';
+        + '<div class="cl-step-text"><b>' + esc(t.title) + '</b>' + (t.note ? '<span class="cb-note">' + esc(t.note) + '</span>' : '') + arr(t.detail).map((x) => '<span class="cb-det">' + esc(x) + '</span>').join('') + '</div></li>';
     }).join('');
     const nm = esc(q(c.name));
     return '<header class="cl-head"><div><h2>' + esc(c.name) + '</h2><p class="hint">' + plural(steps.length, 'paso', 'pasos')

@@ -1456,6 +1456,8 @@ button.rec-btn.rec-on::before { content: ""; display: inline-block; width: 8px; 
 .cb-steps { margin: 8px 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; }
 .cb-steps li { line-height: 1.35; }
 .cb-det { display: block; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.cb-note { display: block; margin: 2px 0 1px; font-size: 13px; line-height: 1.4; color: var(--fg); overflow-wrap: anywhere; }
+.vs-sub.vs-note { color: var(--fg); font-size: 13px; }
 .cb-warn { color: var(--warn); }
 
 /* ---------- Combos grabados (sección Combos) ---------- */
