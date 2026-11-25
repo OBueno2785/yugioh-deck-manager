@@ -18,7 +18,7 @@
   };
   const VERBS = ['add', 'addOrSS', 'ss', 'token', 'send', 'discard', 'draw', 'banish', 'destroy', 'returnHand', 'returnDeck',
     'deckTop', 'set', 'placeST', 'placePZ', 'attach', 'detach', 'tribute', 'banishTop', 'millTop', 'position', 'level',
-    'payLP', 'lpGain', 'reveal', 'procSummon', 'target'];
+    'payLP', 'lpGain', 'reveal', 'procSummon', 'target', 'addOrSend', 'normalSummon'];
   // Mismas tablas que rules.js (ATTRS / RACES_EN)
   const ATTRS = [['EARTH', 0x1], ['WATER', 0x2], ['FIRE', 0x4], ['WIND', 0x8], ['LIGHT', 0x10], ['DARK', 0x20], ['DIVINE', 0x40]];
   const RACES_EN = [['Beast-Warrior', 0x8000], ['Winged Beast', 0x200], ['Sea Serpent', 0x40000], ['Divine-Beast', 0x200000],
@@ -42,7 +42,7 @@
   const REMOVERS = ['destroy', 'banish', 'returnHand'];
   const TO_ME = ['add', 'addOrSS', 'ss', 'set', 'placeST', 'placePZ', 'attach', 'token'];
   // Verbos cuyo resultado son cartas a las que se puede referir después ("..., and if you do, Special Summon it")
-  const PRODUCES = ['add', 'addOrSS', 'ss', 'token', 'send', 'discard', 'banish', 'destroy', 'returnHand', 'returnDeck', 'deckTop',
+  const PRODUCES = ['add', 'addOrSS', 'addOrSend', 'ss', 'token', 'send', 'discard', 'banish', 'destroy', 'returnHand', 'returnDeck', 'deckTop',
     'set', 'placeST', 'placePZ', 'attach', 'millTop', 'draw'];
   const COST_VERBS = ['discard', 'send', 'banish', 'tribute', 'detach', 'payLP', 'banishTop', 'millTop', 'returnDeck', 'returnHand',
     'deckTop', 'reveal', 'position', 'target'];
@@ -182,7 +182,15 @@
     });
     if (bad) return { ok: false, rest: bad };
     strip(/,? except this card\b/, () => { f.other = true; });
-    strip(/ that (?:mentions?|lists?|specifically lists the card) ("[^"]+")(?: in its text)?/, (m) => { f.mentions = [m[1].slice(1, -1)]; });
+    // "except the Tributed monster": la carta del costo (Junk Signal)
+    strip(/,? except the (?:Tributed|discarded|sent|banished|revealed|returned) (?:monster|card)\b/, () => { f.notCost = true; });
+    // "that is "Junk Warrior" or "Stardust Dragon", or that mentions either of them"
+    strip(/,? that is ("[^"]+"(?:,? (?:or|and\/or) "[^"]+")*),? or that mentions (?:either|any|one) of them\b/, (m) => { f.namesOrMentions = m[1].match(/"[^"]+"/g).map((x) => x.slice(1, -1)); });
+    strip(/ that (?:mentions?|lists?|specifically lists the card) ("[^"]+"(?:,? (?:or|and\/or) "[^"]+")*)(?: in its text)?/, (m) => { f.mentions = m[1].match(/"[^"]+"/g).map((x) => x.slice(1, -1)); });
+    // "with the same Level as the targeted monster" (Crimson Dragon): el Nivel del objetivo
+    strip(/ with the same Level as (?:the targeted monster|that target|the target|that targeted monster)\b/, () => { f.sameLevel = { ref: 'targets' }; });
+    // "as many ... as possible with different Levels" (Junk Speeder): se revisa al elegir (todas juntas)
+    strip(/ with different Levels\b/, () => { f.distinctLevels = true; });
     strip(/ with (\d+) or (less|more|lower|higher) (?:original )?(ATK|DEF)\b/, (m) => { f[m[3].toLowerCase()] = range(+m[1], m[2]); });
     strip(/ with (\d+) (ATK|DEF)\b/, (m) => { f[m[2].toLowerCase()] = { eq: +m[1] }; });
     strip(/ with different names\b/, () => { f.distinctNames = true; });
@@ -306,7 +314,13 @@
     if (f.notArch && f.notArch.some((n) => isArch(c, n))) return false;
     if (f.names && !f.names.some((n) => isNamed(c, n))) return false;
     if (f.except && f.except.some((n) => isNamed(c, n))) return false;
-    if (f.mentions && !f.mentions.some((n) => String(c.desc || '').includes('"' + n + '"') && db.nameKey(c.name) !== db.nameKey(n))) return false;
+    const mentions = (n) => String(c.desc || '').includes('"' + n + '"') && db.nameKey(c.name) !== db.nameKey(n);
+    if (f.mentions && !f.mentions.some(mentions)) return false;
+    if (f.namesOrMentions && !f.namesOrMentions.some((n) => isNamed(c, n) || mentions(n))) return false;
+    if (f.sameLevel) {
+      const lvs = ctx.targetLevels && ctx.targetLevels.length ? ctx.targetLevels : (ctx.targetCards || []).map((x) => x && x.lv);
+      if (!lvs.length || !(mon && !xyzLink) || !lvs.includes(inst && typeof inst.level === 'number' ? inst.level : c.lv)) return false;
+    }
     const area = ctx.area || null;
     const inExtra = area === 'extra' || area === 'extraUp' || (!area && inst && 'extraFaceUp' in inst);
     const onField = area ? /^(?:field|fieldUp|mzone|stzone|pzone|oppField)$/.test(area) : !!(inst && 'faceDown' in inst && !inExtra);
@@ -405,8 +419,12 @@
       const n = +m[1] || NUMW[m[1].toLowerCase()];
       return { count: verb === 'target' ? { min: 1, max: n } : { min: 0, max: n }, rest: m[2] };
     }
-    if ((m = s.match(/^as many (.+?) as possible$/i))) {
-      return REMOVERS.includes(verb) ? { count: { all: true }, rest: m[1] } : { manual: 'count' };
+    if ((m = s.match(/^as many (.+?) as possible((?: with [^,]+)?)$/i))) {
+      if (REMOVERS.includes(verb) && !m[2]) return { count: { all: true }, rest: m[1] };
+      // Invocar "as many ... as possible": todas las que se puedan (las que hay y las zonas libres); se cuenta al resolver
+      // (con nombres distintos u otra condición del grupo, a mano: no se cuenta bien cuántas caben)
+      if (verb === 'ss' && !/\bwith (?!different Levels\b)/i.test(m[1] + m[2])) return { count: { min: 1, max: 5, asMany: true }, rest: m[1] + m[2] };
+      return { manual: 'count' };
     }
     if ((m = s.match(/^all (?:of )?(?:the )?(.+)$/i))) {
       return REMOVERS.includes(verb) || verb === 'level' ? { count: { all: true }, rest: m[1] } : { manual: 'count' };
@@ -555,7 +573,7 @@
   // Modificadores de una Invocación Especial (y del destierro) que se quitan antes de leer el objeto
   const SS_MODS = [
     [/,? ignoring (?:its|their) Summoning conditions/i, (o) => { o.ignoreConditions = true; }],
-    [/,? but (?:negate (?:its|their) effects|(?:its|their) effects are negated|(?:it|they) (?:has|have) (?:its|their) effects negated)/i, (o) => { o.negateEffects = true; }],
+    [/,? but (?:negate (?:its|their) effects|(?:its|their) effects are negated|(?:it|they) (?:has|have) (?:its|their) effects negated)|\s*\(but (?:negate (?:its|their) effects|(?:its|their) effects are negated)\)/i, (o) => { o.negateEffects = true; }],
     [/,? but banish (?:it|them) when (?:it|they) leaves? the field|\s*\(but banish (?:it|them) when (?:it|they) leaves? the field\)/i, (o) => { o.banishOnLeave = true; o.note = 'Si deja el campo, queda desterrada.'; }],
     [/,? but (?:place|shuffle|return) (?:it|them) (?:on the bottom of|into) the Deck when (?:it|they) leaves? the field/i, (o, x) => { o._notes.push(note('linger', x[0].replace(/^,?\s*but\s*/i, ''))); }],
     [/,? but (?:destroy|banish|return|send|shuffle) (?:it|them)(?: to the hand| to the GY| into the Deck)? during the End Phase(?: of (?:this|the next) turn)?/i, (o, x) => { o._notes.push(note('delayed', x[0].replace(/^,?\s*but\s*/i, ''))); }],
@@ -595,6 +613,21 @@
     if (/^pay\b/i.test(s)) return manual(raw, 'lp');
     if ((m = s.match(/^(?:you )?gain (\d+) LP$/i))) return finish(Object.assign(out, { verb: 'lpGain', lp: +m[1] }));
     if (/^(?:you )?gain\b.*\bLP\b/i.test(s)) return manual(raw, 'lp');
+    // "then take 700 damage" (Assault Synchron): pierdes esos LP
+    if ((m = s.match(/^(?:you )?take (\d+) (?:points of )?damage$/i))) return finish(Object.assign(out, { verb: 'payLP', lp: +m[1], damage: true }));
+    // "Immediately after this effect resolves, Normal Summon 1 Level 4 or lower monster" (Wheel Synchron): una Invocación
+    // Normal que hace el efecto (no la que da "in addition to your Normal Summon" para más tarde: esa es una nota)
+    if ((m = s.match(/^Normal Summon (.+)$/i)) && !/\bin addition\b|\bthis turn\b|\bduring\b|\bor Set\b/i.test(s)) {
+      let o = m[1];
+      const pl = placeOf(o);
+      if (pl && (pl.many || pl.areas.some((x) => x !== 'hand'))) return manual(raw, 'place');
+      if (pl) o = pl.s;
+      const co = countOf(o.replace(/,$/, '').trim(), 'normalSummon');
+      if (!co || co.manual || !(co.count.min === 1 && co.count.max === 1)) return manual(raw, 'count');
+      const fr = parseFilter(co.rest);
+      if (!fr.ok) return manual(raw, 'filter');
+      return finish(Object.assign(out, { verb: 'normalSummon', count: co.count, from: ['hand'], filter: fr.filter }));
+    }
     // Cartas de arriba del Mazo
     if ((m = s.match(/^(banish|send) (?:the top (\d+|two|three|five|ten) cards? of your Deck|the top card of your Deck|(\d+) cards? from the top of your Deck)((?:,? face-down| \(face-down\))?)(?: to the GY)?$/i))) {
       const n = +(m[2] || m[3] || 1) || NUMW[String(m[2]).toLowerCase()] || ({ ten: 10 })[String(m[2]).toLowerCase()];
@@ -636,7 +669,13 @@
       ['reveal', /^reveal\s+/i],
       ['target', /^target\s+/i],
     ];
-    const hit = V.find(([, re]) => re.test(s));
+    // "take 1 X from your Deck, and either add it to your hand or send it to the GY" (Scrap Warrior): eliges al resolver
+    let forced = null;
+    if (/^take\s/i.test(s) && (m = findTop(s, /,? and either add (?:it|them) to (?:your|the) hand or send (?:it|them) to the GY$/i))) {
+      s = cut(s, m).replace(/^take\s+/i, '');
+      forced = ['addOrSend', /^/];
+    }
+    const hit = forced || V.find(([, re]) => re.test(s));
     if (!hit) return null;
     let verb = hit[0];
     s = s.replace(hit[1], '');
@@ -658,7 +697,10 @@
       let x;
       if ((x = dest(/,? to (?:the|your|its owner's|their owner's|their owners'|their|the owner's) hands?$/i))) verb = 'returnHand';
       else if ((x = dest(/,? on (?:the )?(top|bottom|top or bottom) of (?:the|your|its owner's|their owners'|the owner's) Decks?(?: in any order)?$/i))) { verb = 'deckTop'; out.deckPos = x[1] === 'top or bottom' ? 'topOrBottom' : x[1]; }
-      else if ((x = dest(/,? (?:in)?to (?:the|your|its owner's|their owners'|the owner's|their) (?:Deck(?:\/Extra Deck| or Extra Deck| and\/or Extra Deck)?|Extra Deck)(?: and shuffle(?: it| them)?)?$/i))) { verb = 'returnDeck'; out.deckPos = 'shuffle'; }
+      else if ((x = dest(/,? (?:in)?to (?:the|your|its owner's|their owners'|the owner's|their) (?:Deck(?:\/Extra Deck| or Extra Deck| and\/or Extra Deck)?|Extra Deck)(?: and shuffle(?: it| them)?)?$/i))) {
+        verb = 'returnDeck'; out.deckPos = 'shuffle';
+        if (/^,? (?:in)?to (?:the|your|its owner's|their owners'|the owner's|their) Extra Deck\b/i.test(x[0])) out.extraDeck = true;
+      }
       else return manual(raw, 'dest');
     } else if (verb === 'place') {
       let x;
@@ -694,9 +736,11 @@
     if (/\buntil the (?:End Phase|end of)\b/i.test(s)) return manual(raw, 'temporary');
     // Lugar
     let place = null;
-    if (verb === 'target') {
+    // "target 1 banished LIGHT or DARK monster" (Bystial): tus cartas desterradas (las del rival se eligen a mano)
+    if ((m = s.match(/^(\d+|a|an|one) banished (?!cards? of\b)/i)) && !placeOf(s)) { s = m[1] + ' ' + s.slice(m[0].length); place = { areas: ['ban'], s }; }
+    if (verb === 'target' && !place) {
       const x = findTop(s, /,? in your center Main Monster Zone$/i);
-      if (x) { place = { areas: ['mzone'], zone: 'center' }; s = cut(s, x); }
+      if (x) { s = cut(s, x); place = { areas: ['mzone'], zone: 'center', s }; }
     }
     if (!place) {
       place = placeOf(s);
@@ -704,7 +748,7 @@
         if (place.many) return manual(raw, 'place');
         s = place.s;
       }
-    }
+    } else s = place.s;
     s = s.replace(/^directly /i, '').replace(/,$/, '').trim();
     // Dos objetos ("1 X and 1 Y", "both this card and 1 X")
     if (findTop(s, / and (?:\d+|a|an|up to \d+|this card|that)\b|^both this card\b|,? including\b/i)) return manual(raw, 'multi-object');
@@ -783,13 +827,23 @@
       if (areas.length > 1) out.owner = 'any';
       return finish(out);
     }
-    if ((m = t.match(/^(?:increase|reduce|decrease|lower|raise) (its|their|this card's|that monster's|that target's|the target's|those monsters') Levels? by (\d+)$/i))) {
-      const kind = /this card's/i.test(m[1]) ? 'this' : /target/i.test(m[1]) ? 'targets' : /^its$/i.test(m[1]) ? 'it' : /^their|those/i.test(m[1]) ? 'them' : 'that';
+    // "reduce its Level by 2" · "by up to 4" (eliges cuánto) · "increase or decrease its Level by 1" (eliges) ·
+    // "Increase this card's Level by the Level of the sent monster" (Accel Synchron: el Nivel de la carta del costo)
+    const OBJ = "(its|their|this card's|that monster's|that target's|the target's|those monsters')";
+    if ((m = t.match(new RegExp('^(?:increase|reduce|decrease|lower|raise)( or (?:increase|reduce|decrease|lower|raise))? ' + OBJ + ' Levels? by (?:(up to )?(\\d+)|the (?:original )?Level of (the (?:sent|discarded|banished|Tributed|revealed) (?:card|monster)))$', 'i')))) {
+      const kind = /this card's/i.test(m[2]) ? 'this' : /target/i.test(m[2]) ? 'targets' : /^its$/i.test(m[2]) ? 'it' : /^their|those/i.test(m[2]) ? 'them' : 'that';
       const b = bindRef(kind, 'level', ctx);
       if (b.note) return note('opp', raw);
       if (b.manual) return manual(raw, b.manual);
       if (b.owner === 'opp') return note('opp', raw);
-      return finish(Object.assign(out, { verb: 'level', refers: b.refers, amount: sign * +m[2] }));
+      Object.assign(out, { verb: 'level', refers: b.refers });
+      if (m[5]) {
+        if (m[1] || bindRef('cost', 'level', ctx).manual) return manual(raw, 'level');
+        Object.assign(out, { amount: sign, amountRef: 'cost' });
+      } else out.amount = sign * +m[4];
+      if (m[3]) out.upTo = true;
+      if (m[1]) { out.either = true; out.amount = Math.abs(out.amount); }
+      return finish(out);
     }
     return manual(raw, /\bATK\b|\bDEF\b/.test(t) ? 'stat' : 'level');
   }
@@ -818,6 +872,8 @@
     let s = m[2];
     out.verb = 'procSummon';
     out.method = m[1].toLowerCase();
+    // "Synchro Summon using this card you control" (Accel Synchron) · "using monsters you control as material": cualquiera
+    if (/^(?:by )?using\b/i.test(s)) s = '1 ' + m[1] + ' Monster ' + s;
     // "Fusion Summon ..., OR Ritual Summon ...": dos invocaciones distintas para elegir → a mano
     if (/\bOR (?:Fusion|Synchro|Xyz|Link|Ritual) Summon\b/i.test(s)) return manual(raw, 'options');
     const tail = findTop(s, /,? (?:using|by using|by Tributing|by banishing|by sending|by shuffling|whose)\b.*$/i);
@@ -952,6 +1008,16 @@
   function build(c, e) {
     const plan = emptyPlan(c, e);
     const p = partsOf(e);
+    // "1 "Assault Mode Activate" or 1 card that mentions it": "it" es el último nombre entre comillas antes
+    const mentionsIt = (text, before) => String(text || '').replace(/\bthat mentions it\b/g, (x, at, all) => {
+      const names = (before + ' ' + all.slice(0, at)).match(/"[^"]+"/g);
+      return names ? 'that mentions ' + names[names.length - 1] : x;
+    });
+    p.cost = mentionsIt(p.cost, p.cond);
+    p.res = mentionsIt(p.res, p.cond + ' ' + p.cost);
+    // "Add 2 monsters from your Deck to your hand (1 "Junk Synchron" and 1 monster that mentions ...)": las dos, una tras otra
+    p.res = p.res.replace(/\bAdd (?:2|two) (?:cards?|monsters?) from your Deck to your hand \((1 [^()]*?) and (1 [^()]*)\)/,
+      (x, a, b) => 'Add ' + a + ' from your Deck to your hand, and if you do, add ' + b + ' from your Deck to your hand');
     const descBullets = DESC_BULLETS.test(p.cond) || DESC_BULLETS.test(p.cost) || DESC_BULLETS.test(p.res);
     // Opciones solo cuando se eligen al activar ("Activate 1 of these effects;"); "..., then you can apply 1 of these effects" queda a mano
     const options = !descBullets && p.bullets.length && (OPTIONS.test(p.cost) || /^(?:you can )?(?:activate|apply|choose) (?:1|one) of (?:these|the following) effects\b/i.test(p.res));
@@ -968,7 +1034,7 @@
         && (/\bopponent\b/i.test(p.cond) || !/\byou (?:activate|control)\b|\byour\b/i.test(p.cond)),
       // "If this card is sent to the GY: Special Summon it": la condición solo nombra a esta carta
       selfCond: /^(?:during [^,:]+, )?(?:if|when) this (?:set |face-up )?card\b/i.test(p.cond)
-        && !/\b(?:monsters?|cards?|it|its|they|them|opponent's|target)\b/i.test(p.cond.replace(/\bthis (?:set |face-up )?card\b/gi, '')),
+        && !/\b(?:monsters?|cards?|it|its|they|them|opponent's|target)\b/i.test(p.cond.replace(/\bthis (?:set |face-up )?card\b/gi, '').replace(/,? except by drawing it\b/i, '')),
       lingerBullets: linger ? 'linger' : lead === 'seq' ? 'seq' : null, optionsHead: !!options, costMoves: false, lastAction: null,
       allTargets: () => plan.targets.concat(ctx.optTargets || []),
     };
@@ -1058,6 +1124,7 @@
     attach: 'Acopla como material', detach: 'Desacopla', tribute: 'Sacrifica', banishTop: 'Destierra de arriba del Mazo',
     millTop: 'Manda de arriba del Mazo al Cementerio', draw: 'Roba', position: 'Cambia la posición de', level: 'Cambia el Nivel de',
     payLP: 'Paga', lpGain: 'Gana', token: 'Invoca', reveal: 'Revela', target: 'Elige como objetivo',
+    addOrSend: 'Añade a la mano o manda al Cementerio', normalSummon: 'Invoca de forma Normal',
   };
   const FROM_ES = {
     hand: 'de la mano', deck: 'del Mazo', extra: 'del Extra Deck', extraUp: 'boca arriba del Extra Deck', gy: 'del Cementerio',
@@ -1103,6 +1170,10 @@
     if (f.atk) out.push('con ' + statEs(f.atk, 'ATK'));
     if (f.def) out.push('con ' + statEs(f.def, 'DEF'));
     if (f.mentions) out.push('que mencione ' + f.mentions.map(q).join(' o '));
+    if (f.namesOrMentions) out.push('que sea o mencione ' + f.namesOrMentions.map(q).join(' o '));
+    if (f.sameLevel) out.push('del mismo Nivel que el objetivo');
+    if (f.distinctLevels) out.push('con Niveles distintos');
+    if (f.notCost) out.push('(no la del costo)');
     if (f.differentFrom) out.push('con distinto ' + ({ attribute: 'Atributo original', race: 'Tipo original', name: 'nombre', level: 'Nivel original' })[f.differentFrom.prop]);
     if (f.distinctNames) out.push('con nombres distintos');
     return out.join(' ');
@@ -1115,7 +1186,7 @@
     if (!a) return '';
     if (a.verb === 'manual') return 'Hazlo a mano: ' + q(a.text);
     if (a.verb === 'draw') return 'Roba ' + a.count.max + (a.count.max === 1 ? ' carta' : ' cartas');
-    if (a.verb === 'payLP') return a.lp === 'half' ? 'Paga la mitad de tus LP' : 'Paga ' + a.lp + ' LP';
+    if (a.verb === 'payLP') return a.damage ? 'Recibes ' + a.lp + ' de daño' : a.lp === 'half' ? 'Paga la mitad de tus LP' : 'Paga ' + a.lp + ' LP';
     if (a.verb === 'lpGain') return 'Gana ' + a.lp + ' LP';
     if (a.verb === 'banishTop' || a.verb === 'millTop') return VERB_ES[a.verb] + ' ' + a.count.max + (a.count.max === 1 ? ' carta' : ' cartas') + (a.faceDown ? ' (boca abajo)' : '');
     if (a.verb === 'token') return 'Invoca ' + a.count.max + ' ' + q(a.token.name) + (a.position === 'def' ? ' en Defensa' : '');
@@ -1126,7 +1197,9 @@
     if (a.refers) obj = REF_ES[a.refers] || 'esa carta';
     else {
       const f = a.filter;
-      obj = a.count && a.count.all ? (f && f.type === 'monster' ? 'todos los ' : 'todas las ') + filterEs(f, true) : countEs(a.count) + ' ' + filterEs(f, plural);
+      obj = a.count && a.count.all ? (f && f.type === 'monster' ? 'todos los ' : 'todas las ') + filterEs(f, true)
+        : a.count && a.count.asMany ? (f && f.type === 'monster' ? 'todos los ' : 'todas las ') + filterEs(f, true) + ' que puedas'
+          : countEs(a.count) + ' ' + filterEs(f, plural);
     }
     let s = head + ' ' + obj;
     if (a.from && a.from.length) {
@@ -1138,7 +1211,11 @@
     if (a.each) s += ' (de cada lugar)';
     if (a.zone === 'center') s += a.verb === 'target' ? ' (Zona de Monstruo central)' : ' a tu Zona de Monstruo central';
     if (a.verb === 'add') s += ' a la mano';
-    if (a.verb === 'level') s += ' (' + (a.amount > 0 ? '+' : '') + a.amount + ')';
+    if (a.verb === 'level') {
+      const n = Math.abs(Number(a.amount) || 0), sg = a.amount < 0 ? '−' : '+';
+      s += a.amountRef === 'cost' ? ' (' + sg + ' el Nivel de la carta del costo)' : a.either ? ' (+' + n + ' o −' + n + ')' : a.upTo ? ' (hasta ' + sg + n + ')' : ' (' + sg + n + ')';
+    }
+    if (a.verb === 'returnDeck' && a.extraDeck) s = s.replace(/^Baraja en el Mazo\b/, 'Devuelve al Extra Deck');
     if (a.verb === 'position') s += ': ' + ({ atk: 'en Ataque', def: 'en Defensa', set: 'boca abajo en Defensa', toggle: 'la contraria' })[a.position];
     else if (a.position) s += ({ atk: ' en Ataque', def: ' en Defensa', set: ' boca abajo en Defensa' })[a.position];
     if (a.verb === 'deckTop') s += ({ top: ' (arriba)', bottom: ' (abajo)', topOrBottom: ' (arriba o abajo)' })[a.deckPos] || '';
@@ -1150,7 +1227,7 @@
   }
 
   /** ¿Con qué cartas compara "with a different ..."? → 'cost' | 'targets' | null (para saber si faltan esas cartas). */
-  const diffRefOf = (f) => (!f ? null : f.anyOf ? f.anyOf.map(diffRefOf).find(Boolean) || null : f.differentFrom ? f.differentFrom.ref : null);
+  const diffRefOf = (f) => (!f ? null : f.anyOf ? f.anyOf.map(diffRefOf).find(Boolean) || null : f.differentFrom ? f.differentFrom.ref : f.sameLevel ? f.sameLevel.ref : null);
   // Bits de Atributo y Tipo por su nombre en inglés ("EARTH", "Beast"), para las fichas
   const bits = { attr: (w) => bitOf(ATTRS, String(w || '').toUpperCase()), race: (w) => bitOf(RACES_EN, String(w || '').replace(/-Type$/, '')) };
   YGO.effects = { parse, parseClause, parseFilter, match, describe, diffRefOf, bits, AREAS, VERBS, ACTIVATED };

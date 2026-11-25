@@ -1927,7 +1927,7 @@
     o = o || {};
     const out = [];
     const skip = o.exclude || new Set();
-    const base = { selfUid: o.self, costCards: o.costCards || [], targetCards: o.targetCards || [] };
+    const base = { selfUid: o.self, costCards: o.costCards || [], targetCards: o.targetCards || [], targetLevels: o.targetLevels || [] };
     const add = (inst, area, zone, opp) => {
       if (!inst || skip.has(inst.uid) || out.some((x) => x.uid === inst.uid)) return;
       // VS: una carta boca abajo del rival se compara solo con lo que se ve (monstruo o Mágica/Trampa, y su posición)
@@ -1994,7 +1994,9 @@
       const sel = new Map();
       const chosen = () => groups.flatMap((g) => g.uids.slice(0, sel.get(g.key) || 0));
       const names = new Map(groups.flatMap((g) => g.uids.map((u) => [u, g.c.name])));
-      const distinct = (u) => !(o.action.filter && o.action.filter.distinctNames) || new Set(u.map((x) => names.get(x))).size === u.length;
+      const lvs = new Map(groups.flatMap((g) => g.uids.map((u) => [u, levelOf(g.inst, g.c)])));
+      const distinct = (u) => (!(o.action.filter && o.action.filter.distinctNames) || new Set(u.map((x) => names.get(x))).size === u.length)
+        && (!(o.action.filter && o.action.filter.distinctLevels) || new Set(u.map((x) => lvs.get(x))).size === u.length);
       const valid = (u) => u.length >= min && u.length <= max && distinct(u);
       const done = (r) => { closeModal(); resolve(r); };
       const buttons = [];
@@ -2451,6 +2453,8 @@
     if (!a.count) return { manual: true };
     const costCards = arr(l.auto.costIds).map((id) => db.get(id)).filter(Boolean);
     const targetCards = arr(l.auto.targetLocs).map((t) => db.get(t.id)).filter(Boolean);
+    // Nivel actual del objetivo ("with the same Level as the targeted monster"); si ya no está, el de la carta
+    const targetLevels = arr(l.auto.targetLocs).map((t) => { const g = find(t.uid); const c = db.get(t.id); return g ? levelOf(g.inst, g.c) : c ? c.lv : null; }).filter((x) => x != null);
     // "with a different Attribute" sin las cartas con qué comparar (el costo o el objetivo se hicieron a mano): a mano
     const ref = fxCall('diffRefOf', [a.filter], null);
     if ((ref === 'cost' && !costCards.length) || (ref === 'targets' && !targetCards.length)) {
@@ -2460,14 +2464,27 @@
     // Sin rival en el campo: lo que haría sobre sus cartas lo resuelve él ("destroy all": las tuyas sí se hacen)
     const oppOff = areasOf(o.action || a).includes('oppField') && !oppOn();
     if (oppOff && (a.count.all || a.owner === 'opp')) R.opp.push(a.text || describe(a));
-    const cands = candidates(o.action || a, { self: l.uid, costCards, targetCards });
+    // "except the Tributed monster": la carta que se pagó como costo no se elige
+    const notCost = (f) => !!f && (f.notCost || (f.anyOf || []).some((g) => g.notCost));
+    const exclude = notCost(a.filter) ? new Set(arr(l.auto.costCards)) : undefined;
+    const cands = candidates(o.action || a, { self: l.uid, costCards, targetCards, targetLevels, exclude });
     const none = () => {
       // Sin rival: solo del rival → ya quedó anotado; "1 card on the field" sin cartas tuyas → puede ser suya: a mano
       if (oppOff) return a.count.all || a.owner === 'opp' ? { none: true } : { manual: true };
       const t = 'CL' + R.n + ': no hay cartas que cumplan · ' + describe(a); pushLog({ kind: 'auto', text: t }); toast(t, 'warn'); return { none: true };
     };
     if (a.count.all) return cands.length ? { uids: cands.map((x) => x.uid) } : none();
-    const min = Math.max(0, Number(a.count.min) || 0), max = Math.max(min, Number(a.count.max) || 0, 1);
+    let min = Math.max(0, Number(a.count.min) || 0), max = Math.max(min, Number(a.count.max) || 0, 1);
+    if (a.count.asMany) {
+      // "as many as possible": todas las que se puedan (Niveles distintos si lo pide) y que quepan en tus zonas libres
+      if (!cands.length) return none();
+      const free = MZ.filter((z) => !S.zones[z].length).length
+        + (cands.some((x) => db.isExtra(x.c)) && !EMZ.some((z) => S.zones[z].length) && EMZ.some((z) => !emzTaken(z)) ? 1 : 0);
+      const kinds = a.filter && a.filter.distinctLevels ? new Set(cands.map((x) => levelOf(x.inst, x.c))).size : cands.length;
+      const n = Math.min(kinds, free);
+      if (!n) { log('no quedan Zonas de Monstruo libres · ' + describe(a)); return { none: true }; }
+      min = max = n;
+    }
     const title = 'CL' + R.n + ' · ' + R.card;
     if (a.each) {
       // "up to 1 … each from your hand, Deck, and GY": una ventana por lugar
@@ -2646,17 +2663,37 @@
     const sel = a.refers ? await cardsFor(a, R) : { uids: candidates(Object.assign({}, a, { from: ['mzone'] }), { self: R.l.uid }).map((x) => x.uid) };
     if (sel.manual) return { manual: true };
     if (!sel.uids) return { did: false };
+    // "by the Level of the sent monster" (Accel Synchron): el Nivel de la carta del costo
+    let base = Math.abs(Number(a.amount) || 0);
+    if (a.amountRef === 'cost') {
+      const lv = arr(R.l.auto.costIds).map((id) => db.get(id)).filter((c) => c && db.isMonster(c) && !(c.type & (T.XYZ | T.LINK))).map((c) => c.lv);
+      if (lv.length !== 1) return { manual: true };
+      base = lv[0];
+    }
+    const sign = Number(a.amount) < 0 ? -1 : 1;
     const out = [];
-    sel.uids.forEach((u) => {
+    for (const u of sel.uids) {
       const f = find(u);
-      if (!f) { if (oppEntry(u)) R.opp.push(a.text); return; }
-      if (f.loc.area !== 'field' || f.loc.index !== 0 || !isMonsterZone(f.loc.zone) || f.inst.faceDown || !db.isMonster(f.c) || f.c.type & (T.XYZ | T.LINK)) return;
+      if (!f) { if (oppEntry(u)) R.opp.push(a.text); continue; }
+      if (f.loc.area !== 'field' || f.loc.index !== 0 || !isMonsterZone(f.loc.zone) || f.inst.faceDown || !db.isMonster(f.c) || f.c.type & (T.XYZ | T.LINK)) continue;
       const before = levelOf(f.inst, f.c);
-      const after = Math.max(1, before + (Number(a.amount) || 0));
+      let delta = sign * base;
+      // "by up to N" (eliges cuánto) e "increase or decrease ... by N" (eliges hacia dónde): un Nivel nunca baja de 1
+      if (a.upTo || a.either) {
+        const opts = [];
+        if (a.either) [base, -base].forEach((d) => { if (before + d >= 1) opts.push(d); });
+        else for (let k = 1; k <= base; k++) if (before + sign * k >= 1) opts.push(sign * k);
+        if (!opts.length) { pushLog({ kind: 'auto', text: 'CL' + R.n + ': el Nivel de ' + q(f.c.name) + ' ya es ' + before + ': no puede bajar más' }); continue; }
+        const lbl = (d) => (d > 0 ? '+' : '−') + Math.abs(d) + ' (Nivel ' + (before + d) + ')';
+        const k = await chooseP('Nivel de ' + f.c.name + ' (ahora ' + before + ')', esc(a.text || describe(a)), opts.map(lbl), 'Hacer a mano');
+        if (R.gen !== autoGen || k == null) return out.length ? { did: true, uids: out } : { manual: true };
+        delta = opts[k];
+      }
+      const after = Math.max(1, before + delta);
       if (after === f.c.lv) delete f.inst.level; else f.inst.level = after;
       pushLog({ kind: 'auto', text: 'Nivel de ' + q(f.c.name) + ': ' + before + ' → ' + after + ' (por ' + R.by + ')' });
       out.push(u);
-    });
+    }
     if (a.owner === 'any' && !a.refers) R.opp.push(a.text); // los del rival no se tocan
     render();
     return { did: out.length > 0, uids: out };
@@ -2678,6 +2715,22 @@
     });
     render();
     return { did: out.length > 0, uids: out };
+  }
+
+  /** "Immediately after this effect resolves, Normal Summon 1 ..." (Wheel Synchron): eliges el monstruo de la mano y se
+   * Invoca como siempre (zona); las reglas saben que la hace el efecto (no gasta tu Invocación Normal). */
+  async function runNormal(a, R) {
+    const log = (text) => pushLog({ kind: 'auto', text: 'CL' + R.n + ': ' + text });
+    const cands = candidates(Object.assign({}, a, { from: ['hand'] }), { self: R.l.uid }).filter((x) => db.isMonster(x.c) && !db.isExtra(x.c));
+    if (!cands.length) { log('no hay monstruos en la mano para «' + a.text + '»'); return { did: false }; }
+    const r = await pickCards({ title: 'Invocación Normal · ' + R.card, action: a, cands, min: 1, max: 1, optional: true });
+    if (R.gen !== autoGen || r === 'manual') return { manual: true };
+    if (!Array.isArray(r)) { log('salta «' + a.text + '»'); return { did: false }; }
+    const uid = r[0];
+    const ok = await new Promise((resolve) => startSummon('normal', uid, { src: 'chain:' + R.i, after: resolve }));
+    if (R.gen !== autoGen) return { manual: true };
+    if (!ok) { log('no se hizo la Invocación Normal (la cancelaste)'); return { did: false }; }
+    return { did: true, uids: [uid] };
   }
 
   /** Fusión/Sincronía/Xyz/Link/Ritual: eliges el monstruo y los materiales se eligen como siempre (banda de materiales). */
@@ -2763,6 +2816,16 @@
       if (R.gen !== autoGen || k == null) return { manual: true };
       return k === 0 ? moveFor([u], Object.assign({}, a, { verb: 'add' }), R, 'hand') : summonCards([u], a, R);
     },
+    addOrSend: async (a, R) => {
+      const sel = await cardsFor(a, R);
+      if (sel.manual) return { manual: true };
+      if (!sel.uids) return { did: false };
+      const u = sel.uids[0];
+      const k = await chooseP('¿Qué haces con ' + q(nameOf(u)) + '?', R.card, ['Añadir a la mano', 'Mandar al Cementerio'], 'Hacer a mano');
+      if (R.gen !== autoGen || k == null) return { manual: true };
+      return k === 0 ? moveFor([u], Object.assign({}, a, { verb: 'add' }), R, 'hand') : moveFor([u], Object.assign({}, a, { verb: 'send' }), R, 'gy');
+    },
+    normalSummon: (a, R) => runNormal(a, R),
     token: async (a, R) => {
       const t = a.token || {};
       const n = Math.max(1, Number(a.count && a.count.max) || 1);
@@ -2841,7 +2904,7 @@
       const before = Number(S.lp) || 0;
       const n = a.lp === 'half' ? Math.floor(before / 2) : Math.max(0, Number(a.lp) || 0);
       S.lp = Math.max(0, before - n);
-      pushLog({ kind: 'auto', text: R.by + ': pagas ' + n + ' LP (LP ' + before + ' → ' + S.lp + ')' });
+      pushLog({ kind: 'auto', text: R.by + ': ' + (a.damage ? 'recibes ' + n + ' de daño' : 'pagas ' + n + ' LP') + ' (LP ' + before + ' → ' + S.lp + ')' });
       render();
       return { did: true, uids: [] };
     },

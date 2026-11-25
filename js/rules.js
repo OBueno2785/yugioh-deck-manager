@@ -260,9 +260,26 @@
     return d.includes('always treated as "' + name + '"') || d.includes('name becomes "' + name + '"');
   }
 
+  /* ---------- Textos de material de Sincronía que cambian la regla ---------- */
+  // "If this card you control is used as Synchro Material, you can treat it as a non-Tuner" (Wheel Synchron, Zalen...)
+  const AS_NON_TUNER = /\bthis card(?: you control)? (?:is|would be) used as (?:a )?Synchro Material, you can treat it as a non-Tuner\b/i;
+  const AS_NON_TUNER_SENTENCE = /[^.]*\bthis card(?: you control)? (?:is|would be) used as (?:a )?Synchro Material, you can treat it as a non-Tuner\b[^.]*\.?/i;
+  /** ¿Puede contar como no Cantante en esta Sincronía? (Solo si está en tu campo, cuando se sabe dónde está) */
+  const asNonTuner = (x) => AS_NON_TUNER.test(x.c.desc || '') && (!x.loc || (x.loc.area === 'field' && MON_ZONES.includes(x.loc.zone)));
+  /** "For a Synchro Summon, you can substitute this card for any 1 "Synchron" Tuner" (Scrap Synchron, Starjunk Synchron):
+   * sirve como el Cantante nombrado ("Junk Synchron", "Scrap Synchron") si ese es un Cantante de ese arquetipo. */
+  function substitutesFor(c, name) {
+    const m = String((c && c.desc) || '').match(/\bsubstitute this card for any (?:1|one) "([^"]+)" Tuner\b/i);
+    if (!m) return false;
+    const t = db.findByName(name);
+    return !!t && !!(t.type & T.TUNER) && isArch(t, m[1]);
+  }
+
   /* ---------- Descripciones de monstruos ("1 non-Tuner Spellcaster monster") ---------- */
-  /** Devuelve { tests: [fn(x)], labels: [texto], understood }. x = { c: carta, inst } */
-  function parseDesc(src) {
+  /** Devuelve { tests: [fn(x)], labels: [texto], understood }. x = { c: carta, inst, loc? }
+   * ctx.proc 'synchro': materiales de Sincronía (no Cantante por su texto, sustitutos de un Cantante nombrado). */
+  function parseDesc(src, ctx) {
+    const syn = !!(ctx && ctx.proc === 'synchro');
     const d = { tests: [], labels: [], understood: true, src };
     let s = String(src || '').trim();
     const take = (re) => {
@@ -273,7 +290,7 @@
     const items = (str, re) => str.split(new RegExp(SEP)).map((x) => x.trim()).filter((x) => re.test(x));
     let m, guard = 0;
     while (s && guard++ < 30) {
-      if (take(/^non-Tuners?\b/)) { d.tests.push((x) => !(x.c.type & T.TUNER)); d.labels.push('no Cantante'); continue; }
+      if (take(/^non-Tuners?\b/)) { d.tests.push((x) => !(x.c.type & T.TUNER) || (syn && asNonTuner(x))); d.labels.push('no Cantante'); continue; }
       if (take(/^non-Link\b/)) { d.tests.push((x) => !(x.c.type & T.LINK)); d.labels.push('no Link'); continue; }
       if (take(/^non-Effect\b/)) { d.tests.push((x) => !(x.c.type & T.EFFECT)); d.labels.push('sin Efecto'); continue; }
       if (take(/^non-Token\b/)) { d.tests.push((x) => !isToken(x)); continue; }
@@ -323,7 +340,7 @@
         const names = m[0].match(/"[^"]+"/g).map((n) => n.slice(1, -1));
         const arch = /^(?:monsters?|Monsters?|Tuners?|cards?|Spells?|Traps?|Ritual|Fusion|Synchro|Xyz|Link|Pendulum|Normal|Effect)\b/.test(s);
         if (arch) { d.tests.push((x) => names.some((n) => isArch(x.c, n))); d.labels.push(names.map(q).join(' o ')); }
-        else { d.tests.push((x) => names.some((n) => isNamed(x.c, n))); d.labels.push(names.map(q).join(' o ')); d.named = names; }
+        else { d.tests.push((x) => names.some((n) => isNamed(x.c, n) || (syn && substitutesFor(x.c, n)))); d.labels.push(names.map(q).join(' o ')); d.named = names; }
         continue;
       }
       if (take(/^(?:monsters?|Monsters?)\b/)) continue;
@@ -342,7 +359,7 @@
   const fits = (desc, x) => desc.tests.every((t) => t(x));
 
   /** "2+ Effect Monsters, including a Tuner" → { min, max, desc, group, understood } */
-  function parsePart(p) {
+  function parsePart(p, ctx) {
     let s = String(p).trim();
     let min = 1, max = 1, m;
     if ((m = s.match(/^(\d+)\+\s+/))) { min = +m[1]; max = Infinity; }
@@ -360,7 +377,7 @@
         return !!r;
       };
       if (cut(/,? except Tokens$/, () => { group.noTokens = true; })) continue;
-      if (cut(/,? including (?:a|an|at least (\d+)) (.+)$/, (r) => { group.including = parseDesc(r[2]); group.includingMin = r[1] ? +r[1] : 1; })) continue;
+      if (cut(/,? including (?:a|an|at least (\d+)) (.+)$/, (r) => { group.including = parseDesc(r[2], ctx); group.includingMin = r[1] ? +r[1] : 1; })) continue;
       if (cut(/,? with different names$/, () => { group.diffNames = true; })) continue;
       if (cut(/,? with the same Attribute but different Types$/, () => { group.same = ['attribute']; group.diff = ['race']; })) continue;
       if (cut(/,? with different (Types|Attributes)(?: and (?:different )?(Types|Attributes))?$/, (r) => {
@@ -371,7 +388,7 @@
       })) continue;
       if (cut(/,? except "([^"]+)"(?: monsters?)?$/, (r) => { group.except = r[1]; })) continue;
     }
-    const desc = parseDesc(s);
+    const desc = parseDesc(s, ctx);
     if (group.including && !group.including.understood) understood = false;
     return { min, max, desc, group, understood: understood && desc.understood, text: String(p).trim() };
   }
@@ -857,7 +874,7 @@
       const text = analyze(c).materials;
       let parts = [], understood = false;
       if (text) {
-        parts = splitTop(text, ' + ').map(parsePart);
+        parts = splitTop(text, ' + ').map((x) => parsePart(x, { proc: procedure }));
         understood = parts.length > 0 && parts.every((p) => p.understood);
       }
       // Otra forma de Invocación Xyz/Sincronía...: "You can also Xyz Summon this card by using ..." o con el nombre de la carta
@@ -1051,15 +1068,45 @@
     Xyz: /would be used as Xyz Material|treat (?:it|this card) as (?:a )?Level \d|can be treated as (?:a )?Level|for the Xyz Summon of/i,
     Link: /would be used as Link Material|as 2 (?:Link )?materials|treat (?:it|this card) as 2|treat this card as Link Material|can be used as Link Material/i,
   };
-  const specialMat = (word, x) => SPECIAL_MAT[word].test(x.c.desc || '');
+  // (Lo de "trátalo como no Cantante" ya lo revisan las partes de los materiales: no ablanda los demás errores)
+  const specialMat = (word, x) => SPECIAL_MAT[word].test(word === 'Synchro' ? String(x.c.desc || '').replace(AS_NON_TUNER_SENTENCE, '') : x.c.desc || '');
+  /** "If you Synchro Summon a monster that mentions a "Synchron" Tuner as material, this card in your hand can also be used
+   * as material" (Scrap Synchron): ¿la Sincronía de target lo permite? → true | false | null (no tiene ese texto) */
+  function handSynchroOk(mc, target) {
+    const m = String((mc && mc.desc) || '').match(/If you Synchro Summon a monster that mentions (?:a|an) "([^"]+)" Tuner as (?:its )?material, this card in your hand can also be used as (?:Synchro )?material/i);
+    if (!m) return null;
+    const text = String(parseMaterials(target).text || '');
+    const re = /"([^"]+)"( Tuners?)?/g;
+    let r;
+    while ((r = re.exec(text))) {
+      if (r[2] && caseKey(r[1]) === caseKey(m[1])) return true;
+      const t = db.findByName(r[1]);
+      if (t && t.type & T.TUNER && isArch(t, m[1])) return true;
+    }
+    return false;
+  }
+  const handMatKey = (c) => 'handmat:' + db.nameKey(c.name);
   /** Cartas boca arriba en tu campo (para efectos continuos que cambian reglas). */
   const fieldCards = (S) => FIELD_ZONES.map((z) => topOf(S, z)).filter((i) => i && !i.faceDown).map((i) => db.get(i.id)).filter(Boolean);
   const onFieldFaceUp = (x) => x.loc.area === 'field' && MON_ZONES.includes(x.loc.zone) && !x.inst.faceDown;
   const onField = (x) => x.loc.area === 'field' && MON_ZONES.includes(x.loc.zone);
   /** Los materiales de Sincronía/Xyz/Link deben estar boca arriba en tu campo. */
-  function needFieldFaceUp(v, xs, word, relaxed) {
+  function needFieldFaceUp(v, xs, word, relaxed, target, t) {
     for (const x of xs) {
       if (onFieldFaceUp(x)) continue;
+      // Scrap Synchron desde la mano (una vez por turno)
+      if (word === 'Synchro' && target && x.loc.area === 'hand') {
+        const ok = handSynchroOk(x.c, target);
+        if (ok) {
+          if (t && t.opt && t.opt[handMatKey(x.c)]) err(v, 'Ya usaste ' + q(x.c.name) + ' desde la mano como material este turno (una vez por turno).');
+          (v.handMats = v.handMats || []).push(x.c.name);
+          continue;
+        }
+        if (ok === false) {
+          (relaxed ? warn : err)(v, q(x.c.name) + ' solo sirve desde la mano para un monstruo que menciona un Cantante ' + q((x.c.desc.match(/mentions (?:a|an) "([^"]+)" Tuner/i) || [])[1] || '') + ' como material, y ' + q(target.name) + ' no lo menciona.');
+          continue;
+        }
+      }
       const special = specialMat(word, x);
       const msg = !onField(x) ? q(x.c.name) + ' no está en tu campo.' : q(x.c.name) + ' está boca abajo: los materiales deben estar boca arriba.';
       if (relaxed || special) warn(v, msg + ' Solo vale si un efecto lo permite.');
@@ -1130,7 +1177,7 @@
       sourceOrMain(v, S, req, t, method, true);
       if (!xs.length) err(v, 'Elige los materiales.');
       else {
-        needFieldFaceUp(v, xs, word, !!req.source);
+        needFieldFaceUp(v, xs, word, !!req.source, c, t);
         // Los Tokens no pueden ser material Xyz (sí de Sincronía, Link o Fusión)
         if (method === 'xyz') for (const x of xs) if (isToken(x)) err(v, q((x.inst.token && x.inst.token.name) || x.c.name) + ' es un Token: los Tokens no pueden ser material Xyz.');
         if (method === 'synchro') synchroChecks(v, c, xs);
@@ -1204,12 +1251,23 @@
     return e ? e.text : c.desc || '';
   }
 
+  /** ¿Es la Invocación Normal que hace un efecto al resolverse ("Immediately after this effect resolves, Normal Summon ...")? */
+  function effectNormal(S, req) {
+    if (!req || !req.source || req.method !== 'normal') return false;
+    const src = sourceCard(S, req);
+    return !!src && /\bimmediately after this effect resolves,? Normal Summon\b/i.test(sourceText(S, req, src));
+  }
   function normalChecks(S, req, v, t, c, loc, xs, desc, reqText) {
     const method = req.method;
     const isSet = method === 'set' || method === 'tributeSet';
     const what = isSet ? 'Colocar de forma Normal' : 'Invocar de forma Normal';
-    openMain(v, S, t, what);
-    if (t.normalSummons >= 1) {
+    // "Immediately after this effect resolves, Normal Summon 1 ..." (Wheel Synchron): la hace el efecto al resolverse, con la
+    // cadena todavía abierta, y no gasta tu Invocación Normal del turno ("in addition to your Normal Summon" es otra cosa: un permiso)
+    const byEffect = effectNormal(S, req);
+    if (byEffect) {
+      if (!t.mine) err(v, 'Solo puedes ' + what + ' en tu turno.');
+    } else openMain(v, S, t, what);
+    if (t.normalSummons >= 1 && !byEffect) {
       // Una Invocación Normal adicional es legal si un efecto te la da: uno activado este turno o uno continuo en tu campo
       const granted = t.acts.filter((x) => EXTRA_NS.test(actText(x))).length;
       const onBoard = fieldCards(S).some((fc) => EXTRA_NS.test(fc.desc || ''));
@@ -1454,7 +1512,10 @@
   /** Bloqueos de invocación activos y "solo puedes invocar X una vez por turno". */
   function specialLimits(S, req, v, t, c, a, fromExtra, method) {
     // Los bloqueos con kind (p. ej. 'noDeckAdd' de Droll) no son de invocación
-    const locks = t.locks.filter((l) => l && !l.kind).map((l) => ({ lock: l, source: l.source }));
+    // El bloqueo que puso un efecto no frena lo que ese mismo efecto Invoca ("Special Summon as many ... as possible, also you
+    // cannot Special Summon for the rest of this turn": Crimson Dragon Quetzalcoatl)
+    const ownLock = (l) => l.srcUid != null && req.sourceUid != null && l.srcUid === req.sourceUid && (req.sourceEffect == null || Number(req.sourceEffect) === Number(l.srcIdx));
+    const locks = t.locks.filter((l) => l && !l.kind && !ownLock(l)).map((l) => ({ lock: l, source: l.source }));
     for (const z of [...MON_ZONES, ...ST, 'fz']) {
       const inst = topOf(S, z);
       if (!inst || inst.faceDown || inst.uid === req.uid) continue;
@@ -1788,7 +1849,7 @@
     const method = req.method || 'special';
     const uids = method === 'pendulum' && Array.isArray(req.uids) && req.uids.length ? req.uids : [req.uid];
     try {
-      if (NORMAL_METHODS.includes(method)) t.normalSummons = (t.normalSummons || 0) + 1;
+      if (NORMAL_METHODS.includes(method)) { if (!effectNormal(S, req)) t.normalSummons = (t.normalSummons || 0) + 1; }
       else {
         if (method === 'pendulum') t.pendulumSummons = (t.pendulumSummons || 0) + 1;
         const own = !!(req.ownProcedure || req.effectIndex != null);
@@ -1798,6 +1859,7 @@
           if (!c) continue;
           const from = (v.from && v.from[uid]) || loc.area;
           t.specials.push({ id: c.id, extra: from === 'extra' });
+          for (const n of (v && v.handMats) || []) { const k = 'handmat:' + db.nameKey(n); t.opt[k] = (t.opt[k] || 0) + 1; }
           for (const o of analyze(c).summonOpts) {
             if (o.method && o.method !== method) continue;
             if (o.thisWay && !own) continue;
@@ -1835,7 +1897,8 @@
           const store = o.duel ? t.duel : t.opt;
           store[key] = (store[key] || 0) + 1;
         }
-        for (const l of e.locks) if (l.timing === 'rest' || l.timing === 'turn') t.locks.push(Object.assign({ source: c.name }, l));
+        // (srcUid/srcIdx: lo que Invoca ese mismo efecto al resolverse no queda bloqueado por su propio "also you cannot ...")
+        for (const l of e.locks) if (l.timing === 'rest' || l.timing === 'turn') t.locks.push(Object.assign({ source: c.name, srcUid: req.uid, srcIdx: idx }, l));
       }
       // Efectos activados este turno (Invocación Normal adicional, activar el turno en que se Colocó, Mulcharmy...)
       if (c) t.acts.push({ id: c.id, effectIndex: idx, monster: db.isMonster(c) && idx > 0 });
